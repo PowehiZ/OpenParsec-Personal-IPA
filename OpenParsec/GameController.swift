@@ -230,7 +230,7 @@ private final class RumbleEngine {
 	private var lastIntensity: Double = -1
 	private var lastSharpness: Double = -1
 
-	init(haptics: GCControllerHaptics) throws {
+	init(haptics: GCDeviceHaptics) throws {
 		// 不同手柄支持的震动区域不同，`.default` 不一定在列表里，逐个试
 		var created: CHHapticEngine?
 		var failure: Error?
@@ -263,7 +263,7 @@ private final class RumbleEngine {
 	}
 
 	/// 优先 default，其次手柄声明支持的区域；列表为空时仍然试 default
-	private static func candidates(_ haptics: GCControllerHaptics) -> [GCHapticsLocality] {
+	private static func candidates(_ haptics: GCDeviceHaptics) -> [GCHapticsLocality] {
 		let supported = haptics.supportedLocalities
 		let preferred: [GCHapticsLocality] = [.default, .leftHandle, .rightHandle, .leftTrigger, .rightTrigger]
 		if supported.isEmpty { return preferred }
