@@ -209,3 +209,33 @@ jobs:
           path: out/${{ env.SCHEME }}.ipa
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish IPA to release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SCHEME }}-ipa
+          path: out
+
+      # 把 IPA 挂到固定的 nightly release 上，得到一个不用登录、不用解压的直链：
+      # https://github.com/<owner>/<repo>/releases/download/nightly/OpenParsec.ipa
+      - name: Publish to nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -lh out
+          NOTES="自动构建（未签名 fakesign）· commit ${GITHUB_SHA} · run ${GITHUB_RUN_NUMBER}"
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly "out/$SCHEME.ipa" --clobber
+            gh release edit nightly --notes "$NOTES"
+          else
+            gh release create nightly "out/$SCHEME.ipa" --title "nightly" --notes "$NOTES"
+          fi
+          echo "::notice::直链 ${{ github.server_url }}/${{ github.repository }}/releases/download/nightly/$SCHEME.ipa"
