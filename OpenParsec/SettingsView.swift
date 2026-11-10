@@ -45,6 +45,8 @@ struct SettingsView: View {
 	@AppStorage("gyroSmoothing") var gyroSmoothing: Double = 0.3
 	@AppStorage("gyroInvertH") var gyroInvertH: Bool = false
 	@AppStorage("gyroInvertV") var gyroInvertV: Bool = false
+	@AppStorage("gyroRequireL2") var gyroRequireL2: Bool = true
+	@AppStorage("gyroUseControllerMotion") var gyroUseControllerMotion: Bool = true
 
 	let resolutionChoices: [Choice<ParsecResolution>]
 
@@ -261,6 +263,14 @@ struct SettingsView: View {
 							}
 							CatItem(L("Invert Vertical")) {
 								Toggle("", isOn: $gyroInvertV)
+									.frame(width: 80)
+							}
+							CatItem(L("Hold L2 to Aim")) {
+								Toggle("", isOn: $gyroRequireL2)
+									.frame(width: 80)
+							}
+							CatItem(L("Controller Gyro")) {
+								Toggle("", isOn: $gyroUseControllerMotion)
 									.frame(width: 80)
 							}
 							CatItem(L("Recenter")) {

@@ -19,6 +19,13 @@ final class GamepadController: ObservableObject {
 	@Published private(set) var batteryText: String = ""
 	@Published private(set) var lastEvent: String = "—"
 
+	/// L2 是否按住（陀螺仪瞄准的激活键）
+	private(set) var aimTriggerHeld = false
+	/// 手柄右摇杆的当前值（Parsec 坐标：X 右正、Y 上正）。
+	/// 陀螺仪接管右摇杆时，由 GyroController 把这两项与陀螺仪贡献叠加后统一发送。
+	private(set) var rightStickParsecX: Float = 0
+	private(set) var rightStickParsecY: Float = 0
+
 	private(set) var orderedControllers: [GCController] = []
 	private(set) var mice = Set<GCMouse>()
 	weak var delegate: InputManagerDelegate?
@@ -208,6 +215,9 @@ final class GamepadController: ObservableObject {
 	}
 
 	private func handleTrigger(_ axis: ParsecGamepadAxis, _ value: Float, label: String, id: UInt32) {
+		if axis == GAMEPAD_AXIS_TRIGGERL {
+			aimTriggerHeld = value > 0.5
+		}
 		if value > 0.05 {
 			lastEvent = "\(label) → \(String(format: "%.2f", value))"
 		}
@@ -224,6 +234,14 @@ final class GamepadController: ObservableObject {
 		if abs(ax) > 0.3 || abs(ay) > 0.3 {
 			lastEvent = "\(label) → \(String(format: "%.2f", ax)), \(String(format: "%.2f", ay))"
 		}
+
+		if axisY == GAMEPAD_AXIS_RY {
+			rightStickParsecX = ax
+			rightStickParsecY = ay
+			// 陀螺仪接管右摇杆时只更新快照，由 GyroController 叠加后统一发出（100Hz）
+			if GyroController.shared.ownsRightStick { return }
+		}
+
 		CParsec.sendGameControllerAxisMessage(controllerId: id, axisX, ButtonFloatToParsecInt(ax))
 		CParsec.sendGameControllerAxisMessage(controllerId: id, axisY, ButtonFloatToParsecInt(ay))
 	}
@@ -353,6 +371,12 @@ final class GamepadController: ObservableObject {
 			orderedControllers.remove(at: index)
 		}
 		delegate?.inputManager(self, didDisconnect: controller)
+		if orderedControllers.isEmpty {
+			// 手柄全拔了：别让 L2 的"按住"状态残留，否则陀螺仪会在没手柄时以为闸门是开的
+			aimTriggerHeld = false
+			rightStickParsecX = 0
+			rightStickParsecY = 0
+		}
 		registerControllerHandler()
 	}
 }
@@ -379,13 +403,12 @@ enum GyroTarget: Int, CaseIterable, Hashable {
 
 /// 陀螺仪 -> 鼠标相对移动 / 右摇杆。
 ///
-/// Parsec 协议里没有陀螺仪通道，只能"模拟"：
-/// - `.mouse`：把转动速率换算成像素位移，走 sendMouseDelta，主机端当成一只无线鼠标（FPS 瞄准）
-/// - `.rightStick`：把转动速率映射成右摇杆推杆量（纯手柄游戏也能用）
+/// Parsec 协议没有陀螺仪通道，所以只能"模拟"：
+/// - `.mouse`：转动换算成像素位移（FPS 瞄准）
+/// - `.rightStick`：转动映射成右摇杆推杆量，并与手柄自己的右摇杆**叠加**（混合瞄准）
 ///
-/// 轴映射不写死横竖屏：用重力方向求出世界竖直轴，
-/// 水平 = 转动速率在世界竖直轴上的投影，垂直 = 在屏幕水平轴上的投影，
-/// 所以横屏、竖屏、斜着拿方向都一致。
+/// 轴映射不写死横竖屏：用重力求世界竖直轴，水平 = 在该轴上的投影，垂直 = 在屏幕水平轴上的投影。
+/// 启动时静止采样 0.5s 求零偏；按住 L2 才输出（没接手柄时自动放行）。
 final class GyroController: ObservableObject {
 
 	static let shared = GyroController()
@@ -401,11 +424,19 @@ final class GyroController: ObservableObject {
 	}()
 
 	private var running = false
+	private var calibrating = false
+	private var calibH: Double = 0
+	private var calibV: Double = 0
+	private var calibCount = 0
+	private var biasH: Double = 0
+	private var biasV: Double = 0
 	private var filteredH: Double = 0
 	private var filteredV: Double = 0
 	private var samples = 0
 	private var lastStickX: Float = 0
 	private var lastStickY: Float = 0
+	/// 0.5s @ 100Hz
+	private let calibrationTarget = 50
 
 	private init() {
 		let center = NotificationCenter.default
@@ -419,6 +450,18 @@ final class GyroController: ObservableObject {
 
 	var isAvailable: Bool {
 		return motion.isDeviceMotionAvailable
+	}
+
+	/// 是否由陀螺仪接管右摇杆（此时手柄自己的右摇杆由这里统一发送，两者叠加）
+	var ownsRightStick: Bool {
+		return SettingsHandler.gyroEnabled && SettingsHandler.gyroTarget == .rightStick
+	}
+
+	/// 按住 L2 才输出；没接手柄时无法按 L2，直接放行
+	private var gateOpen: Bool {
+		if !SettingsHandler.gyroRequireL2 { return true }
+		if GamepadController.shared.orderedControllers.isEmpty { return true }
+		return GamepadController.shared.aimTriggerHeld
 	}
 
 	func startIfNeeded() {
@@ -442,9 +485,8 @@ final class GyroController: ObservableObject {
 
 		running = true
 		samples = 0
-		filteredH = 0
-		filteredV = 0
-		statusText = L("Running")
+		beginCalibration()
+
 		motion.deviceMotionUpdateInterval = 0.01
 		motion.startDeviceMotionUpdates(to: queue) { [weak self] data, _ in
 			guard let self = self else { return }
@@ -460,41 +502,52 @@ final class GyroController: ObservableObject {
 		guard running else { return }
 		running = false
 		motion.stopDeviceMotionUpdates()
-		sendStick(0, 0, force: true)
+		if ownsRightStick {
+			// 交还控制权前先把摇杆归零，避免卡在推满状态
+			sendStick(0, 0, force: true)
+		}
 		statusText = SettingsHandler.gyroEnabled ? L("Stopped") : L("Off")
 	}
 
+	/// 「归中」= 重新做一次零偏校准，顺便清掉滤波残量
 	func recenter() {
+		beginCalibration()
+	}
+
+	private func beginCalibration() {
+		calibrating = true
+		calibH = 0
+		calibV = 0
+		calibCount = 0
 		filteredH = 0
 		filteredV = 0
-		statusText = L("Recentered")
+		statusText = L("Calibrating, keep still")
 	}
 
 	private func handle(_ data: CMDeviceMotion?) {
 		guard running, let d = data else { return }
 		guard SettingsHandler.gyroEnabled else { stop(); return }
 
-		let r = d.rotationRate
-		let g = d.gravity
+		guard let frame = rotationFrame(data: d) else { return }
+		var h = frame.h
+		var v = frame.v
 
-		// 世界竖直轴（设备坐标系）：重力指向地心，取反即"上"
-		var up = SIMD3<Double>(-g.x, -g.y, -g.z)
-		let upLen = simd_length(up)
-		guard upLen > 0.1 else { return }
-		up = up / upLen
-
-		// 屏幕法向，以及屏幕平面内的"上"与"右"
-		let normal = SIMD3<Double>(0, 0, 1)
-		var screenUp = up - simd_dot(up, normal) * normal
-		if simd_length(screenUp) < 0.1 {
-			screenUp = SIMD3<Double>(0, 1, 0)   // 手机平放时的退化情况
+		// 校准阶段：静止采样求零偏，不输出
+		if calibrating {
+			calibH += h
+			calibV += v
+			calibCount += 1
+			if calibCount >= calibrationTarget {
+				biasH = calibH / Double(calibCount)
+				biasV = calibV / Double(calibCount)
+				calibrating = false
+			}
+			updateStatus(h: 0)
+			return
 		}
-		screenUp = screenUp / simd_length(screenUp)
-		let screenRight = simd_cross(screenUp, normal)
 
-		let rate = SIMD3<Double>(r.x, r.y, r.z)
-		var h = simd_dot(rate, up)            // 绕世界竖直轴：左右转
-		var v = simd_dot(rate, screenRight)   // 绕屏幕水平轴：上下点头
+		h -= biasH
+		v -= biasV
 
 		let dz = SettingsHandler.gyroDeadzone
 		if abs(h) < dz { h = 0 }
@@ -509,8 +562,18 @@ final class GyroController: ObservableObject {
 		if SettingsHandler.gyroInvertH { h = -h }
 		if SettingsHandler.gyroInvertV { v = -v }
 
+		// 没按住 L2 时不输出；但右摇杆模式下仍要按 100Hz 把"手柄自己的摇杆"透传出去
+		if !gateOpen {
+			filteredH = 0
+			filteredV = 0
+			if ownsRightStick {
+				sendStick(0, 0)
+			}
+			updateStatus(h: 0)
+			return
+		}
+
 		if SettingsHandler.gyroTarget == .mouse {
-			// 角速度 -> 像素：0.01s × 900 ≈ 每秒 100° 时 900px
 			let dx = -h * 0.01 * 900 * SettingsHandler.gyroSensitivityH
 			let dy = -v * 0.01 * 900 * SettingsHandler.gyroSensitivityV
 			let ix = Int32(dx.rounded())
@@ -520,27 +583,72 @@ final class GyroController: ObservableObject {
 			}
 		} else {
 			let gain = 4.0
-			let sx = Float(max(-1, min(1, -h * gain * SettingsHandler.gyroSensitivityH)))
-			let sy = Float(max(-1, min(1, -v * gain * SettingsHandler.gyroSensitivityV)))
-			sendStick(sx, sy)
+			// 转成 Parsec 摇杆坐标：X 向右为正，Y 向上为正
+			let gx = Float(max(-1, min(1, -h * gain * SettingsHandler.gyroSensitivityH)))
+			let gy = Float(max(-1, min(1, v * gain * SettingsHandler.gyroSensitivityV)))
+			sendStick(gx, gy)
 		}
 
+		updateStatus(h: h)
+	}
+
+	/// 把转动拆成"世界竖直轴上的分量（水平）"和"屏幕水平轴上的分量（垂直）"，单位 rad/s。
+	/// 优先用手柄自带陀螺仪（DualSense / DS4，iOS 17+），否则用手机自己的。
+	private func rotationFrame(data d: CMDeviceMotion) -> (h: Double, v: Double)? {
+		var rate = SIMD3<Double>(d.rotationRate.x, d.rotationRate.y, d.rotationRate.z)
+		var gravity = SIMD3<Double>(d.gravity.x, d.gravity.y, d.gravity.z)
+
+		if #available(iOS 17.0, *), SettingsHandler.gyroUseControllerMotion,
+		   let controllerMotion = GamepadController.shared.orderedControllers.first?.motion {
+			let r = controllerMotion.rotationRate
+			let g = controllerMotion.gravity
+			rate = SIMD3<Double>(r.x, r.y, r.z)
+			gravity = SIMD3<Double>(g.x, g.y, g.z)
+		}
+
+		let up = gravity * -1.0
+		let upLen = simd_length(up)
+		guard upLen > 0.1 else { return nil }
+		let upUnit = up / upLen
+
+		let normal = SIMD3<Double>(0, 0, 1)
+		var screenUp = upUnit - normal * simd_dot(upUnit, normal)
+		if simd_length(screenUp) < 0.1 {
+			screenUp = SIMD3<Double>(0, 1, 0)   // 手机平放时的退化情况
+		}
+		let screenUpUnit = screenUp / simd_length(screenUp)
+		let screenRight = simd_cross(screenUpUnit, normal)
+
+		return (simd_dot(rate, upUnit), simd_dot(rate, screenRight))
+	}
+
+	private func updateStatus(h: Double) {
 		samples += 1
-		if samples % 20 == 0 {
-			let deg = abs(h) * 180.0 / Double.pi
-			DispatchQueue.main.async { [weak self] in
-				self?.statusText = String(format: "%@ · %.0f deg/s", L("Running"), deg)
-			}
+		guard samples % 20 == 0 else { return }
+		let text: String
+		if calibrating {
+			text = L("Calibrating, keep still")
+		} else if !gateOpen {
+			text = L("Running") + " · " + L("Hold L2 to Aim")
+		} else {
+			text = String(format: "%@ · %.0f deg/s", L("Running"), abs(h) * 180.0 / Double.pi)
+		}
+		DispatchQueue.main.async { [weak self] in
+			self?.statusText = text
 		}
 	}
 
-	/// 右摇杆模式：只在变化足够大时下发，避免 100Hz 刷爆消息通道
-	private func sendStick(_ x: Float, _ y: Float, force: Bool = false) {
+	/// 右摇杆：把手柄自己的摇杆与陀螺仪贡献叠加后发出（100Hz）
+	private func sendStick(_ gyroX: Float, _ gyroY: Float, force: Bool = false) {
+		let px = GamepadController.shared.rightStickParsecX
+		let py = GamepadController.shared.rightStickParsecY
+		let x = min(max(px + gyroX, -1), 1)
+		let y = min(max(py + gyroY, -1), 1)
 		guard force || abs(x - lastStickX) > 0.02 || abs(y - lastStickY) > 0.02 else { return }
 		lastStickX = x
 		lastStickY = y
 		CParsec.sendGameControllerAxisMessage(controllerId: 1, GAMEPAD_AXIS_RX, toParsec(x))
-		CParsec.sendGameControllerAxisMessage(controllerId: 1, GAMEPAD_AXIS_RY, toParsec(-y))
+		CParsec.sendGameControllerAxisMessage(controllerId: 1, GAMEPAD_AXIS_RY, toParsec(y))
 	}
 
 	private func toParsec(_ value: Float) -> Int16 {

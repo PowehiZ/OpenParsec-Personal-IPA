@@ -48,5 +48,7 @@ struct SettingsHandler {
 	@AppStorage("gyroSmoothing") public static var gyroSmoothing: Double = 0.3
 	@AppStorage("gyroInvertH") public static var gyroInvertH: Bool = false
 	@AppStorage("gyroInvertV") public static var gyroInvertV: Bool = false
+	@AppStorage("gyroRequireL2") public static var gyroRequireL2: Bool = true
+	@AppStorage("gyroUseControllerMotion") public static var gyroUseControllerMotion: Bool = true
 
 }
