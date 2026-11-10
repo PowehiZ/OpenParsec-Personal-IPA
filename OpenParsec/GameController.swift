@@ -191,6 +191,10 @@ final class GamepadController: ObservableObject {
 		pad.leftTrigger.valueChangedHandler = { [weak self] _, value, _ in
 			self?.handleTrigger(GAMEPAD_AXIS_TRIGGERL, value, label: "L2", id: id)
 		}
+		// 有些手柄/模式把 L2 当数字按钮报，value 不一定给，press 事件也认
+		pad.leftTrigger.pressedChangedHandler = { [weak self] _, _, pressed in
+			self?.handleTrigger(GAMEPAD_AXIS_TRIGGERL, pressed ? 1 : 0, label: "L2", id: id)
+		}
 		pad.rightTrigger.valueChangedHandler = { [weak self] _, value, _ in
 			self?.handleTrigger(GAMEPAD_AXIS_TRIGGERR, value, label: "R2", id: id)
 		}
@@ -445,6 +449,9 @@ final class GyroController: ObservableObject {
 	private var lastStickY: Float = 0
 	/// 上一次的输出目标，用于"从右摇杆切走时补发一次归零"
 	private var lastTarget: GyroTarget = .mouse
+	/// 鼠标模式的亚像素余量
+	private var residualX: Double = 0
+	private var residualY: Double = 0
 	/// 0.5s @ 100Hz
 	private let calibrationTarget = 50
 
@@ -503,6 +510,12 @@ final class GyroController: ObservableObject {
 		motion.startDeviceMotionUpdates(to: queue) { [weak self] data, _ in
 			guard let self = self else { return }
 			self.handle(data)
+		}
+
+		// 看门狗：1.5s 内一个样本都没收到就在状态行直说，避免"看起来开着但没数据"
+		DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+			guard let self = self, self.running, self.samples == 0 else { return }
+			self.statusText = L("No motion data")
 		}
 	}
 
@@ -604,8 +617,14 @@ final class GyroController: ObservableObject {
 		if SettingsHandler.gyroTarget == .mouse {
 			let dx = -h * 0.01 * 900 * SettingsHandler.gyroSensitivityH
 			let dy = -v * 0.01 * 900 * SettingsHandler.gyroSensitivityV
-			let ix = Int32(dx.rounded())
-			let iy = Int32(dy.rounded())
+			// 累积余量：慢速转动的位移可能不到 1px，直接取整会变成"完全不响应"，
+			// 余量留到下一个采样一起发出去。
+			residualX += dx
+			residualY += dy
+			let ix = Int32(residualX.rounded(.towardZero))
+			let iy = Int32(residualY.rounded(.towardZero))
+			residualX -= Double(ix)
+			residualY -= Double(iy)
 			if ix != 0 || iy != 0 {
 				CParsec.sendMouseDelta(ix, iy)
 			}
@@ -660,11 +679,17 @@ final class GyroController: ObservableObject {
 		guard samples % 20 == 0 else { return }
 		let text: String
 		if calibrating {
-			text = L("Calibrating, keep still")
-		} else if !gateOpen {
-			text = L("Running") + " · " + L("Hold L2 to Aim")
+			text = String(format: "%@ · %d", L("Calibrating, keep still"), samples)
 		} else {
-			text = String(format: "%@ · %.0f deg/s", L("Running"), abs(h) * 180.0 / Double.pi)
+			let gateText: String
+			if !SettingsHandler.gyroRequireL2 {
+				gateText = L("L2 not required")
+			} else {
+				gateText = gateOpen ? L("L2 held") : L("L2 hold to aim")
+			}
+			// 样本数能证明传感器回调有没有在跑；角速度能证明数值是不是 0
+			text = String(format: "%@ · %d · %.0f deg/s · %@",
+						  L("Running"), samples, abs(h) * 180.0 / Double.pi, gateText)
 		}
 		DispatchQueue.main.async { [weak self] in
 			self?.statusText = text
