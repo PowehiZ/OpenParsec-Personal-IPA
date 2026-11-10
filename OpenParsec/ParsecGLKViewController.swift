@@ -80,8 +80,9 @@ class ParsecGLKViewController: ParsecPlayground {
 	}
 
 	func updateSize(width: CGFloat, height: CGFloat) {
-		glkView.frame.size.width = width
-		glkView.frame.size.height = height
+		// 同时把原点钉回 (0,0)：只改 size 会让视图相对 contentView 漂移，
+		// 画面随之整体偏移（上方被裁、下方露黑边）。
+		glkView.frame = CGRect(x: 0, y: 0, width: width, height: height)
 	}
 
 }

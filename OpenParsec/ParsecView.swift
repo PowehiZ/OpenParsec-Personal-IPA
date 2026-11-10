@@ -151,14 +151,14 @@ struct ParsecStatusBar: View {
 			ParsecBackgroundManager.shared.glkViewController?.isPaused = false
 			// SDK forgets stream dims on reconnect, re-send them so the frame fills not corners
 			if let vc = parsecViewController {
-				CParsec.setFrame(vc.view.bounds.width, vc.view.bounds.height, UIScreen.main.scale)
+				vc.reapplyStreamDimensions()
 			}
 		}
 
 		if showMenu || SettingsHandler.alwaysShowStatus {
 			let str = String.fromBuffer(&pcs.decoder.0.name.0, length: 16)
 			let metrics = pcs.`self`.metrics.0
-			metricInfo = [
+			var info = [
 				"\(L("Decode")) \(String(format: "%.2f", metrics.decodeLatency))ms",
 				"\(L("Encode")) \(String(format: "%.2f", metrics.encodeLatency))ms",
 				"\(L("Network")) \(String(format: "%.2f", metrics.networkLatency))ms",
@@ -168,6 +168,11 @@ struct ParsecStatusBar: View {
 				"\(L("Draw")) \(String(format: "%.0f", CParsec.drawRate))fps",
 				"\(pcs.decoder.0.h265 ? "H265" : "H264") \(pcs.decoder.0.width)x\(pcs.decoder.0.height) \(pcs.decoder.0.color444 ? "4:4:4" : "4:2:0") \(str)"
 			].joined(separator: "    ")
+			// 菜单展开时额外显示几何信息，方便排查"画面上移/下方黑边"这类偏移
+			if showMenu, let vc = parsecViewController {
+				info += "\n" + vc.streamGeometry
+			}
+			metricInfo = info
 		}
 	}
 

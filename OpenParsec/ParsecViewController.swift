@@ -189,6 +189,9 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
 		scrollView.minimumZoomScale = 1.0
 		scrollView.maximumZoomScale = 5.0
 		scrollView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+		// 不让安全区（状态栏 / Home Indicator）自动改写 contentInset：
+		// 一旦 inset 非零，contentView 会被整体推下去/推上去，画面就会"上方缺一块、下方露黑边"。
+		scrollView.contentInsetAdjustmentBehavior = .never
 		// The scroll view is a programmatically-driven zoom/pan container only. Every touch is
 		// owned by touchOverlay (created below); the scroll view's own gestures are disabled so
 		// they can never race with or swallow our cursor / pinch / scroll handling.
@@ -327,11 +330,14 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
 
 		// Reset zoom on rotation
 		scrollView.zoomScale = 1.0
+		// 只重置缩放不够：残留的 offset / inset 会让画面在新尺寸下继续偏位
+		scrollView.contentInset = .zero
+		scrollView.contentOffset = .zero
 
 		self.glkView.updateSize(width: w, height: h)
 		contentView.frame.size = CGSize(width: w, height: h)
 		scrollView.contentSize = CGSize(width: w, height: h)
-		CParsec.setFrame(w, h, UIScreen.main.scale)
+		CParsec.setFrame(w, h, renderScaleForSDK)
 
         // Reset accessory view to ensure correct width in new orientation
         clearToolbarModifiers(sendToHost: true)
@@ -355,7 +361,38 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
 		glkView.updateSize(width: w, height: h)
 		contentView.frame.size = CGSize(width: w, height: h)
 		scrollView.contentSize = CGSize(width: w, height: h)
-		CParsec.setFrame(w, h, UIScreen.main.scale)
+		// 未缩放时内容必须严格铺满可视区：任何残留 offset/inset 都会让画面整体偏移
+		if scrollView.zoomScale <= 1.01 {
+			scrollView.contentInset = .zero
+			scrollView.contentOffset = .zero
+		}
+		CParsec.setFrame(w, h, renderScaleForSDK)
+		appNote("[geom] view=\(Int(w))x\(Int(h)) scale=\(renderScaleForSDK) zoom=\(scrollView.zoomScale) offset=\(scrollView.contentOffset) inset=\(scrollView.contentInset) host=\(Int(CParsec.hostWidth))x\(Int(CParsec.hostHeight))")
+	}
+
+	/// 上报给 SDK 的缩放系数必须与 GLKView 的真实 drawable 一致。
+	/// 若两者不一致，SDK 会按错误的像素尺寸做 letterbox，画面就会偏移
+	/// （表现为上方被裁掉一点、下方露黑边）。
+	private var renderScaleForSDK: CGFloat {
+		if let glk = glkView as? ParsecGLKViewController {
+			return glk.glkView.contentScaleFactor
+		}
+		return UIScreen.main.scale
+	}
+
+	/// 重连后 SDK 会忘记流尺寸，用与渲染一致的缩放系数重新下发一次；
+	/// 否则它会按错的像素尺寸 letterbox，画面整体偏移。
+	func reapplyStreamDimensions() {
+		CParsec.setFrame(view.bounds.width, view.bounds.height, renderScaleForSDK)
+	}
+
+	/// 排查"画面上移 / 下方黑边"用的几何摘要，显示在串流状态栏第二行。
+	var streamGeometry: String {
+		let b = view.bounds
+		let off = scrollView?.contentOffset ?? .zero
+		let inset = scrollView?.contentInset ?? .zero
+		let zoom = scrollView?.zoomScale ?? 1
+		return "view \(Int(b.width))x\(Int(b.height)) · off \(Int(off.x)),\(Int(off.y)) · inset \(Int(inset.top)),\(Int(inset.bottom)) · zoom \(String(format: "%.2f", zoom)) · host \(Int(CParsec.hostWidth))x\(Int(CParsec.hostHeight))"
 	}
 
 	override func viewDidAppear(_ animated: Bool) {
