@@ -1094,12 +1094,9 @@ extension ParsecViewController: UIPointerInteractionDelegate {
 
 	func pointerInteraction(_ inter: UIPointerInteraction, regionFor request: UIPointerRegionRequest, defaultRegion: UIPointerRegion) -> UIPointerRegion? {
 		let loc = request.location
-		if let iv = view!.hitTest(loc, with: nil) {
-			let rect = view!.convert(iv.bounds, from: iv)
-			let region = UIPointerRegion(rect: rect, identifier: iv.tag)
-			return region
-		}
-		return nil
+		guard let rootView = view, let iv = rootView.hitTest(loc, with: nil) else { return nil }
+		let rect = rootView.convert(iv.bounds, from: iv)
+		return UIPointerRegion(rect: rect, identifier: iv.tag)
 	}
 
 }
