@@ -86,14 +86,23 @@ struct SettingsView: View {
 					.zIndex(1)
 
 					ScrollView {
+						// 版本指纹：一眼确认装的是哪一次构建（谁编的、哪个 commit）
+						Text(getVersionInfo())
+							.font(.system(size: 12))
+							.multilineTextAlignment(.center)
+							.opacity(0.55)
+							.padding(.top, 6)
+
 						CatTitle(L("General"))
 						CatList {
+							// 语言用分段控件直接并排显示，不再藏在菜单里
 							CatItem(L("Language")) {
-								MultiPicker(selection: languageBinding, options:
+								SegmentPicker(selection: languageBinding, options:
 								[
 									Choice(AppLanguage.english.displayName, AppLanguage.english),
 									Choice(AppLanguage.chinese.displayName, AppLanguage.chinese)
 								])
+								.frame(width: 170)
 							}
 						}
 						CatTitle(L("Interactivity"))
@@ -213,10 +222,6 @@ struct SettingsView: View {
 									.frame(width: 80)
 							}
 						}
-						Text(getVersionInfo())
-							.multilineTextAlignment(.center)
-							.opacity(0.5)
-							.padding()
 					}
 					.foregroundColor(Color("Foreground"))
 				}
@@ -236,11 +241,15 @@ struct SettingsView: View {
 		}
 	}
 
+	/// 版本指纹：短版本号 + build 号（CI 里取自 run number）+ commit。
+	/// 构建时由 CI 把 commit 与 run 号写进 Info.plist 的 GitCommitInfo，
+	/// 所以这一行能唯一标识「装的是哪一次构建」。
 	func getVersionInfo() -> String {
 		let info = Bundle.main.infoDictionary
-		let version = info?["CFBundleShortVersionString"] as? String ?? "Unknown version"
-		let commit = info?["GitCommitInfo"] as? String ?? "Unknown commit"
-		return L("Version %@-%@", version, commit)
+		let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+		let build = info?["CFBundleVersion"] as? String ?? "?"
+		let commit = info?["GitCommitInfo"] as? String ?? "unknown"
+		return "\(version) · build \(build) · \(commit)"
 	}
 }
 

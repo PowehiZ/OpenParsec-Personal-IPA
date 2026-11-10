@@ -113,6 +113,17 @@ jobs:
           fi
           du -sh "$APP"
 
+      # 把 commit 与 run 号写进 App 的 Info.plist：设置页顶部那行
+      # 「1.4.0 · build N · hash run N」就是读它，用来确认装的是哪一次构建。
+      - name: Stamp build info
+        run: |
+          set -euo pipefail
+          APP="build/archive.xcarchive/Products/Applications/$SCHEME.app"
+          STAMP="$(git rev-parse --short HEAD) run $GITHUB_RUN_NUMBER"
+          /usr/libexec/PlistBuddy -c "Delete :GitCommitInfo" "$APP/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :GitCommitInfo string $STAMP" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :GitCommitInfo" "$APP/Info.plist"
+
       - name: Upload xcarchive
         uses: actions/upload-artifact@v4
         with:

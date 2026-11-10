@@ -29,6 +29,21 @@
 - `xcarchive` —— 想自己重新签名时用（14 天）
 - `archive-log` —— xcodebuild 完整日志（7 天），排查失败时看这个
 
+## 3.5 怎么确认装的是哪一版
+
+设置页**最顶部**有一行灰色版本指纹：
+
+```
+1.4.0 · build 14 · 8408c87 run 14
+```
+
+- `1.4.0` —— `CFBundleShortVersionString`
+- `build N` —— CI 的 run 号，每构建一次 +1
+- `hash run N` —— 构建时的 commit 与 run 号，由 CI 写进 `Info.plist` 的 `GitCommitInfo`
+
+**语言开关**在设置页第一组「通用 / General」的第一行，是并排的 `English | 中文` 分段按钮，
+点一下即时切换，不用重启。
+
 ## 4. 这个 IPA 能直接装吗
 
 **不能。** 它是未签名包，拖进 iPhone 装不上。三条路：
