@@ -1,0 +1,200 @@
+name: Build unsigned IPA
+
+# 触发：推送到 main，或在 Actions 页面手动 Run workflow
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SCHEME: OpenParsec
+  PROJECT: OpenParsec.xcodeproj
+
+jobs:
+  build:
+    name: Archive (unsigned)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # 不写死版本：镜像里没有该版本时这一步会直接失败
+          xcode-version: latest-stable
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+          echo "::notice::$(xcodebuild -version | head -1)"
+          xcodebuild -list -project "$PROJECT" 2>&1 | head -30 || true
+
+      # ParsecSDK.framework 不随仓库提交：Frameworks/ 是个空目录，
+      # 工程靠 SYSTEM_FRAMEWORK_SEARCH_PATHS = $(PROJECT_DIR)/Frameworks 找它。
+      # 上游 .gitmodules 指向的分支 sdk/ios/ParsecSDK.framework 已被删除，
+      # 但对应 commit 还在，且那个 tree 的根目录就是 framework 本身。
+      # 该 commit 是 SDK 6.0：modulemap 为 `framework module ParsecSDK`，
+      # ParsecClientConfig 含 video[2]/decoderH265，与本项目源码完全配套。
+      # （注意：parsec-sdk 的 master 是 2019 年的 SDK 1.0，用它会有一堆 API 不匹配。）
+      - name: Fetch Parsec SDK 6.0
+        env:
+          SDK_REPO: https://github.com/MalfoyJW/parsec-sdk
+          SDK_COMMIT: bb336699ee7acd7a4eb0c460410a65c23d7f3879
+        run: |
+          set -euo pipefail
+          SDK_DIR="$RUNNER_TEMP/parsec-sdk"
+          rm -rf "$SDK_DIR"
+          mkdir -p "$SDK_DIR"
+          git init -q "$SDK_DIR"
+          git -C "$SDK_DIR" remote add origin "$SDK_REPO"
+          git -C "$SDK_DIR" fetch --depth 1 origin "$SDK_COMMIT"
+          git -C "$SDK_DIR" checkout -q FETCH_HEAD
+          rm -rf Frameworks/ParsecSDK.framework
+          mkdir -p Frameworks/ParsecSDK.framework
+          cp -R "$SDK_DIR/." Frameworks/ParsecSDK.framework/
+          rm -rf Frameworks/ParsecSDK.framework/.git
+          test -f Frameworks/ParsecSDK.framework/ParsecSDK
+          echo "::notice::SDK $(grep -o 'PARSEC_VER_MAJOR [0-9]*' Frameworks/ParsecSDK.framework/Headers/parsec.h | head -1) $(grep -o 'framework module [A-Za-z]*' Frameworks/ParsecSDK.framework/Modules/module.modulemap) archs=$(lipo -archs Frameworks/ParsecSDK.framework/ParsecSDK)"
+
+      - name: Bump build number
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" OpenParsec/Info.plist
+
+      # 未签名归档。注意 run 默认是 `bash -e`：必须 set +e，
+      # 否则 xcodebuild 一失败 shell 立刻退出，下面的日志转储永远执行不到。
+      - name: Archive
+        run: |
+          set +e
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            -archivePath build/archive.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO > build-archive.log 2>&1
+          status=$?
+          echo "xcodebuild exit=$status"
+          if [ "$status" -ne 0 ]; then
+            # 编译错误行做成 annotation（公开可读），GitHub 每次运行最多回传 10 条
+            grep -E "error:" build-archive.log | head -6 | cut -c1-700 | sed 's/^/::error::/'
+            tail -n 3 build-archive.log | cut -c1-700 | sed 's/^/::error::/'
+            exit "$status"
+          fi
+
+      - name: Upload archive log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-log
+          path: build-archive.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify .app
+        run: |
+          set -euo pipefail
+          APP="build/archive.xcarchive/Products/Applications/$SCHEME.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::Archive 里没有 $APP"
+            find build/archive.xcarchive -maxdepth 3 || true
+            exit 1
+          fi
+          du -sh "$APP"
+
+      - name: Upload xcarchive
+        uses: actions/upload-artifact@v4
+        with:
+          # 上传 build 整层，artifact 里才会保留 archive.xcarchive/ 这层目录
+          name: xcarchive
+          path: build
+          retention-days: 14
+
+  package:
+    name: Package fakesigned IPA
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download xcarchive
+        uses: actions/download-artifact@v4
+        with:
+          name: xcarchive
+          path: build
+
+      # 不写死 archive 路径：artifact 的目录层级容易变，直接按名字找 .app
+      - name: Locate app
+        id: locate
+        run: |
+          set -euo pipefail
+          APP=$(find build -maxdepth 6 -type d -name "$SCHEME.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::下载产物里找不到 $SCHEME.app"
+            find build -maxdepth 5 | head -40
+            exit 1
+          fi
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "::notice::app=$APP"
+
+      - name: Install ldid
+        id: ldid
+        run: |
+          set +e
+          URL="${{ github.server_url }}/ProcursusTeam/ldid/releases/latest/download/ldid_linux_$(uname -m)"
+          curl -fsSL -o /tmp/ldid "$URL"
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::warning::ldid 下载失败 rc=$rc，跳过 fakesign"
+            echo "have=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          chmod +x /tmp/ldid
+          sudo mv /tmp/ldid /usr/local/bin/ldid
+          echo "have=1" >> "$GITHUB_OUTPUT"
+
+      # fakesign：AltStore / TrollStore / Sideloadly 重签前的占位签名。
+      # 失败不阻断出包 —— 没有 fakesign 的 IPA 仍可被 AltStore/Sideloadly 重签安装，
+      # 只是 TrollStore 直装不行。
+      - name: Fakesign
+        run: |
+          set +e
+          APP="${{ steps.locate.outputs.app }}"
+          if [ "${{ steps.ldid.outputs.have }}" != "1" ]; then
+            echo "::warning::没有可用的 ldid，跳过 fakesign"
+            exit 0
+          fi
+          if [ -d "$APP/Frameworks" ]; then
+            for fw in "$APP"/Frameworks/*.framework; do
+              [ -d "$fw" ] || continue
+              out=$(ldid -S "$fw" 2>&1) || echo "::warning::fakesign 失败 $fw: $(echo "$out" | head -1)"
+            done
+          fi
+          out=$(ldid -S "$APP" 2>&1) || echo "::warning::fakesign 失败 $APP: $(echo "$out" | head -1)"
+          ls -la "$APP" | head -5
+
+      - name: Zip into Payload
+        run: |
+          set -euo pipefail
+          APP="${{ steps.locate.outputs.app }}"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          (cd out && zip -qry "$SCHEME.ipa" Payload -x '._*' -x '.DS_Store' -x '__MACOSX*')
+          ls -lh out
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SCHEME }}-ipa
+          path: out/${{ env.SCHEME }}.ipa
+          if-no-files-found: error
+          retention-days: 30

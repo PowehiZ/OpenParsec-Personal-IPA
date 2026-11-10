@@ -1,0 +1,21 @@
+# macOS / Xcode
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# 构建产物
+build/
+archive/
+*.xcarchive
+*.ipa
+*.dSYM
+
+# 本地打包/排查产物
+dist/
+*.zip
+.cache/
+
+# 依赖
+Pods/
+Carthage/
+.swiftpm/

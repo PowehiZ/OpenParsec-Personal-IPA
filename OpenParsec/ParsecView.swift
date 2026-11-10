@@ -1,0 +1,661 @@
+import SwiftUI
+import ParsecSDK
+import Foundation
+import AVFoundation
+
+struct ParsecStatusBar: View {
+	// 订阅语言设置：状态栏文案在切换语言后立即刷新
+	@ObservedObject private var language = LanguageStore.shared
+
+	@Binding var showMenu: Bool
+	@State var metricInfo: String = L("Loading...")
+	@Binding var showDCAlert: Bool
+	@Binding var DCAlertText: String
+	@Binding var isReconnecting: Bool
+	@Binding var connectionLost: Bool
+	@State var networkFailureSince: Date?
+	@State var parsecViewController: ParsecViewController?
+	@State var wasDisconnected: Bool = true
+	let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+	let onSilentDisconnect: () -> Void
+
+	init(showMenu: Binding<Bool>, showDCAlert: Binding<Bool>, DCAlertText: Binding<String>, parsecViewController: ParsecViewController, isReconnecting: Binding<Bool>, connectionLost: Binding<Bool>, onSilentDisconnect: @escaping () -> Void) {
+		_showMenu = showMenu
+		_showDCAlert = showDCAlert
+		_DCAlertText = DCAlertText
+		_isReconnecting = isReconnecting
+		_connectionLost = connectionLost
+		self.parsecViewController = parsecViewController
+		self.onSilentDisconnect = onSilentDisconnect
+	}
+
+	var body: some View {
+		// Overlay elements
+		if showMenu || SettingsHandler.alwaysShowStatus {
+			VStack {
+				Text(metricInfo)
+					.frame(minWidth: 200, maxWidth: .infinity, maxHeight: 20)
+					.multilineTextAlignment(.leading)
+					.font(.system(size: 10))
+					.lineSpacing(20)
+					.lineLimit(nil)
+			}
+			.background(Rectangle().fill(Color("BackgroundPrompt").opacity(0.75)))
+			.foregroundColor(Color("Foreground"))
+			.frame(maxHeight: .infinity, alignment: .top)
+			.zIndex(1)
+			.edgesIgnoringSafeArea(.all)
+
+		}
+		EmptyView()
+			.onReceive(timer) { _ in
+				poll()
+			}
+	}
+
+	func poll() {
+		if showDCAlert || ParsecBackgroundManager.shared.isPaused {
+			return
+		}
+
+		var pcs = ParsecClientStatus()
+		var status = CParsec.getStatusEx(&pcs)
+
+		var pipActive = false
+		if #available(iOS 15.0, *) {
+			pipActive = PictureInPictureManager.shared.isPiPActive
+		}
+
+		if status == PARSEC_OK && pcs.networkFailure && !isReconnecting && !pipActive {
+			if networkFailureSince == nil { networkFailureSince = Date() }
+			let lost = Date().timeIntervalSince(networkFailureSince!)
+			let justResumed = Date().timeIntervalSince(ParsecBackgroundManager.shared.resumedAt ?? .distantPast) < 10
+			connectionLost = true
+			if lost >= 3 || justResumed {
+				networkFailureSince = nil
+				connectionLost = false
+				ParsecBackgroundManager.shared.resumedAt = nil
+				status = NETWORK_ERR_INTERRUPTED
+				appNote("[stream] network failure held, treating it as a lost connection")
+			}
+		} else {
+			networkFailureSince = nil
+			connectionLost = false
+		}
+
+		if status != PARSEC_OK {
+			if ParsecBackgroundManager.shared.isMarkedForReconnect {
+				return
+			}
+
+			if status == PARSEC_CONNECTING && isReconnecting {
+				if Date().timeIntervalSince(ParsecBackgroundManager.shared.reconnectStartTime) < 15 {
+					return
+				}
+			}
+
+			if status == CONNECT_WRN_APPROVAL && isReconnecting {
+				if Date().timeIntervalSince(ParsecBackgroundManager.shared.reconnectStartTime) < 60 {
+					return
+				}
+			}
+
+			// PiP: connection died (screen lock killed GPU). Kill connection+audio once,
+			// subsequent polls exit via isMarkedForReconnect above.
+			if pipActive {
+				appNote("[stream] lost during picture in picture, status \(status.rawValue), reconnect owed")
+				CParsec.disconnect()
+				try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+				ParsecBackgroundManager.shared.connectionDidEnd()
+				ParsecBackgroundManager.shared.markForReconnect()
+				wasDisconnected = true
+				return
+			}
+
+			if SettingsHandler.autoReconnect, !status.isPermanentFailure, let peerId = ParsecBackgroundManager.shared.lastPeerId {
+				let mgr = ParsecBackgroundManager.shared
+				if mgr.reconnectAttempts < 3 {
+					let gap: TimeInterval = mgr.reconnectAttempts == 0 ? 0 : mgr.reconnectAttempts == 1 ? 2 : 5
+					if Date().timeIntervalSince(mgr.reconnectStartTime) < gap {
+						return
+					}
+					mgr.reconnectAttempts += 1
+					appNote("[reconnect] attempt \(mgr.reconnectAttempts) after status \(status.rawValue)")
+					isReconnecting = true
+					mgr.reconnectStartTime = Date()
+					parsecViewController?.resetKeyState()
+					CParsec.reconnect(peerId)
+					return
+				}
+				mgr.reconnectAttempts = 0
+			}
+
+			isReconnecting = false
+			wasDisconnected = true
+			let silent = SettingsHandler.autoReconnect && !SettingsHandler.errorPrompts && !status.isPermanentFailure
+			appNote("[stream] ended, status \(status.rawValue), \(silent ? "silent" : "alert")")
+			if silent {
+				// silent: auto-reconnect spent its retries, dont nag with an alert
+				onSilentDisconnect()
+			} else {
+				DCAlertText = status.readable()
+				showDCAlert = true
+			}
+			return
+		}
+
+		if isReconnecting {
+			ParsecBackgroundManager.shared.reconnectAttempts = 0
+			isReconnecting = false
+			appNote("[reconnect] live again")
+			ParsecBackgroundManager.shared.glkViewController?.isPaused = false
+			// SDK forgets stream dims on reconnect, re-send them so the frame fills not corners
+			if let vc = parsecViewController {
+				CParsec.setFrame(vc.view.bounds.width, vc.view.bounds.height, UIScreen.main.scale)
+			}
+		}
+
+		if showMenu || SettingsHandler.alwaysShowStatus {
+			let str = String.fromBuffer(&pcs.decoder.0.name.0, length: 16)
+			let metrics = pcs.`self`.metrics.0
+			metricInfo = [
+				"\(L("Decode")) \(String(format: "%.2f", metrics.decodeLatency))ms",
+				"\(L("Encode")) \(String(format: "%.2f", metrics.encodeLatency))ms",
+				"\(L("Network")) \(String(format: "%.2f", metrics.networkLatency))ms",
+				"\(L("Bitrate")) \(String(format: "%.2f", metrics.bitrate))Mbps",
+				"\(L("RTx")) \(metrics.fastRTs + metrics.slowRTs)",
+				"\(L("Queue")) \(metrics.queuedFrames)",
+				"\(L("Draw")) \(String(format: "%.0f", CParsec.drawRate))fps",
+				"\(pcs.decoder.0.h265 ? "H265" : "H264") \(pcs.decoder.0.width)x\(pcs.decoder.0.height) \(pcs.decoder.0.color444 ? "4:4:4" : "4:2:0") \(str)"
+			].joined(separator: "    ")
+		}
+	}
+
+
+}
+
+// CRITICAL: This class exists to PERSIST the ParsecViewController instance across SwiftUI view updates.
+// Do not remove or change to a struct. If ParsecViewController is recreated, the keyboard responder chain breaks.
+class ParsecSession: ObservableObject {
+    let controller: ParsecViewController
+
+    init() {
+        self.controller = ParsecViewController()
+    }
+}
+
+struct ParsecView: View {
+	var controller: ContentView?
+
+	// 订阅语言设置：串流页的菜单、断线提示会跟着切换
+	@ObservedObject private var language = LanguageStore.shared
+
+	@State var showDCAlert: Bool = false
+	@State var DCAlertText: String = L("Disconnected (reason unknown)")
+	@State var metricInfo: String = L("Loading...")
+
+	@State var hideOverlay: Bool = false
+	@State var showMenu: Bool = false
+
+	@State var showKeyboard: Bool = false
+	@State var zoomEnabled: Bool = false
+
+	@State var muted: Bool = false
+	@State var preferH265: Bool = true
+	@State var constantFps = false
+	@State var isReconnecting: Bool = false
+	@State var connectionLost: Bool = false
+
+	@State var resolutions: [ParsecResolution]
+	@State var bitrates: [Int]
+
+    // Persist the VC across view updates using StateObject.
+    // CRITICAL: Changing this to @State or a simple var will break the keyboard after menu interactions.
+	@StateObject var session = ParsecSession()
+
+    // Observer shared state for updates
+    @ObservedObject var dataModel = DataManager.model
+
+    // Computed property for convenience refactoring
+    var parsecViewController: ParsecViewController {
+        return session.controller
+    }
+
+	// @State var showDisplays: Bool = false
+
+	init(_ controller: ContentView?) {
+		self.controller = controller
+
+		let save = SettingsHandler.saveSessionSettings
+		_muted = State(initialValue: SettingsHandler.startMuted || (save && SettingsHandler.savedMuted))
+		_zoomEnabled = State(initialValue: save ? SettingsHandler.savedZoomEnabled : false)
+		_constantFps = State(initialValue: save ? SettingsHandler.savedConstantFps : false)
+		_resolutions = State(initialValue: ParsecResolution.resolutions)
+		_bitrates = State(initialValue: ParsecResolution.bitrates)
+
+    }
+
+    // We need to set up the callback somewhere safer than init.
+    // 'onAppear' is a good place, or inside the init of ParsecSession if possible (but it doesn't have access to binding).
+    // Let's use onAppear/post.
+
+	var body: some View {
+		ZStack {
+
+			UIViewControllerWrapper(self.parsecViewController)
+				.zIndex(1)
+				.prefersPersistentSystemOverlaysHidden()
+
+			ParsecStatusBar(showMenu: $showMenu, showDCAlert: $showDCAlert, DCAlertText: $DCAlertText, parsecViewController: parsecViewController, isReconnecting: $isReconnecting, connectionLost: $connectionLost, onSilentDisconnect: { disconnect() })
+
+			if isReconnecting || connectionLost {
+				VStack(spacing: 12) {
+					ActivityIndicator(isAnimating: .constant(true), style: .large, tint: .white)
+					Text(isReconnecting ? ParsecBackgroundManager.shared.lastHostname.map { L("Reconnecting to %@...", $0) } ?? L("Reconnecting...") : L("Connection lost..."))
+						.font(.system(size: 16, weight: .medium))
+						.foregroundColor(.white)
+					Button(action: { disconnect() }) {
+						Text(L("Disconnect"))
+							.font(.system(size: 15, weight: .semibold))
+							.foregroundColor(.white)
+							.padding(.horizontal, 20)
+							.padding(.vertical, 8)
+							.background(Color.white.opacity(0.2))
+							.cornerRadius(8)
+					}
+					.padding(.top, 4)
+				}
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
+				.background(Color.black.opacity(0.6))
+				.zIndex(10)
+			}
+
+			if dataModel.isBlocked {
+				Text(L("Host is using the machine"))
+					.foregroundColor(.white)
+					.padding(.horizontal, 16)
+					.padding(.vertical, 10)
+					.background(Color("BackgroundPrompt").opacity(0.85))
+					.cornerRadius(8)
+					.zIndex(3)
+			}
+
+			VStack {
+				if !hideOverlay {
+					HStack {
+						Button(action: {
+							if showMenu {
+								showMenu = false
+							} else {
+								showMenu = true
+								getHostUserData()
+							}
+						}) {
+							Image("IconTransparent")
+								.resizable()
+								.aspectRatio(contentMode: .fit)
+								.frame(width: 48, height: 48)
+								.background(Rectangle().fill(Color("BackgroundPrompt").opacity(showMenu ? 0.75 : 1)))
+								.cornerRadius(8)
+								.opacity(showMenu ? 1 : 0.25)
+						}
+						.padding()
+						.edgesIgnoringSafeArea(.all)
+						Spacer()
+					}
+					if SettingsHandler.showKeyboardButton {
+						HStack {
+							Button(action: toggleKeyboard) {
+								Image(systemName: "keyboard")
+									.resizable()
+									.aspectRatio(contentMode: .fit)
+									.frame(width: 32, height: 32)
+									.foregroundColor(Color("Foreground"))
+									.padding(8)
+									.background(Rectangle().fill(Color("BackgroundPrompt").opacity(showKeyboard ? 0.75 : 0.5)))
+									.cornerRadius(8)
+							}
+							.padding(.leading)
+							.edgesIgnoringSafeArea(.all)
+							Spacer()
+						}
+					}
+
+				}
+				if showMenu {
+					HStack {
+						VStack(spacing: 3) {
+							Button(action: disableOverlay) {
+								Text(L("Hide Overlay"))
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+							Button(action: toggleMute) {
+								Text(L("Sound: %@", muted ? L("OFF") : L("ON")))
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+							Menu {
+								ForEach(resolutions, id: \.self) { resolution in
+									Button(action: {
+										changeResolution(res: resolution)
+									}) {
+										if resolution.width == dataModel.resolutionX && resolution.height == dataModel.resolutionY {
+											Label(resolution.desc, systemImage: "checkmark")
+										} else {
+											Text(resolution.desc)
+										}
+									}
+								}
+							} label: {
+								Text(L("Resolution"))
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+							Menu {
+								ForEach(bitrates, id: \.self) { bitrate in
+									Button(action: {
+										changeBitRate(bitrate: bitrate)
+									}) {
+                                        if bitrate == dataModel.bitrate {
+                                            Label("\(bitrate) Mbps", systemImage: "checkmark")
+                                        } else {
+                                            Text("\(bitrate) Mbps")
+                                        }
+									}
+								}
+							} label: {
+								Text(L("Bitrate"))
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+							if DataManager.model.displayConfigs.count > 1 {
+								Menu {
+									Button(L("Auto")) {
+										changeDisplay(displayId: "none")
+									}
+									ForEach(DataManager.model.displayConfigs, id: \.self) { config in
+										Button("\(config.name) \(config.adapterName)") {
+											changeDisplay(displayId: config.id)
+										}
+									}
+								} label: {
+									Text(L("Switch Display"))
+										.padding(8)
+										.frame(maxWidth: .infinity)
+										.multilineTextAlignment(.center)
+								}
+							}
+
+							Button(action: toggleConstantFps) {
+								Text(L("Constant FPS: %@", constantFps ? L("ON") : L("OFF")))
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+							Button(action: toggleZoom) {
+								Text(L("Zoom: %@", zoomEnabled ? L("ON") : L("OFF")))
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+							Rectangle()
+								.fill(Color("Foreground"))
+								.opacity(0.25)
+								.frame(height: 1)
+							Button(action: { disconnect()}) {
+								Text(L("Disconnect"))
+									.foregroundColor(.red)
+									.padding(8)
+									.frame(maxWidth: .infinity)
+									.multilineTextAlignment(.center)
+							}
+						}
+						.background(Rectangle().fill(Color("BackgroundPrompt").opacity(0.75)))
+						.foregroundColor(Color("Foreground"))
+						.frame(maxWidth: 175)
+						.cornerRadius(8)
+						.padding(.horizontal)
+						// .edgesIgnoringSafeArea(.all)
+						Spacer()
+					}
+				}
+				Spacer()
+			}
+			.zIndex(2)
+		}
+		.statusBarHidden(SettingsHandler.hideStatusBar)
+		.alert(isPresented: $showDCAlert) {
+			Alert(title: Text(DCAlertText),
+				  primaryButton: .default(Text(L("Reconnect")), action: {
+					guard let peerId = ParsecBackgroundManager.shared.lastPeerId else {
+						disconnect()
+						return
+					}
+					showDCAlert = false
+					isReconnecting = true
+					ParsecBackgroundManager.shared.reconnectAttempts = 0
+					ParsecBackgroundManager.shared.reconnectStartTime = Date()
+					parsecViewController.resetKeyState()
+					CParsec.reconnect(peerId)
+				  }),
+				  secondaryButton: .cancel(Text(L("Close")), action: {disconnect()}))
+		}
+		.onChange(of: isReconnecting) { reconnecting in
+			if !reconnecting {
+				CParsec.setMuted(muted)
+				if muted { CParsec.pause(video: false, audio: true) }
+			}
+		}
+		.onAppear(perform: post)
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ParsecBackgroundDisconnect"))) { _ in
+			if #available(iOS 15.0, *) {
+				if PictureInPictureManager.shared.isPiPActive {
+					return
+				}
+			}
+			disconnect(isBackgroundDisconnect: true)
+		}
+		.edgesIgnoringSafeArea(.all)
+
+	}
+
+	func post() {
+		ParsecBackgroundManager.shared.onShouldDisconnect = {
+			NotificationCenter.default.post(name: NSNotification.Name("ParsecBackgroundDisconnect"), object: nil)
+		}
+		if #available(iOS 15.0, *) {
+			PictureInPictureManager.shared.onPiPStopped = { [self] in
+				if UIApplication.shared.applicationState != .active {
+					ParsecBackgroundManager.shared.glkViewController?.isPaused = true
+					CParsec.sendReleaseMessage()
+					CParsec.pause()
+					ParsecBackgroundManager.shared.isPaused = true
+				} else {
+					if ParsecBackgroundManager.shared.isReconnecting {
+						return
+					}
+					// Check actual Parsec status — timers don't reliably fire in background
+					var pcs = ParsecClientStatus()
+					let currentStatus = CParsec.getStatusEx(&pcs)
+					if currentStatus != PARSEC_OK || ParsecBackgroundManager.shared.isMarkedForReconnect {
+						CParsec.disconnect()
+						try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+						ParsecBackgroundManager.shared.markForReconnect()
+						DispatchQueue.main.async {
+							self.disconnect(isBackgroundDisconnect: true)
+						}
+					}
+				}
+			}
+			PictureInPictureManager.shared.onPiPStartFailed = {
+				if UIApplication.shared.applicationState != .active {
+					ParsecBackgroundManager.shared.glkViewController?.isPaused = true
+					CParsec.sendReleaseMessage()
+					CParsec.pause()
+					ParsecBackgroundManager.shared.isPaused = true
+				}
+			}
+		}
+
+		CParsec.applyConfig()
+		CParsec.setMuted(muted)
+		if muted { CParsec.pause(video: false, audio: true) }
+		parsecViewController.setZoomEnabled(zoomEnabled)
+
+		if SettingsHandler.saveSessionSettings {
+			DataManager.model.constantFps = constantFps
+		}
+
+		let screenSize: CGSize = self.parsecViewController.view.frame.size
+		let scaleFactor = UIScreen.main.nativeScale
+		ParsecResolution.updateClientResolution(width: Int(screenSize.width * scaleFactor), height: Int(screenSize.height * scaleFactor))
+
+		getHostUserData()
+
+		hideOverlay = SettingsHandler.noOverlay
+
+        let keyboardShown = $showKeyboard
+        parsecViewController.onKeyboardVisibilityChanged = { visible in
+            keyboardShown.wrappedValue = visible
+        }
+
+		parsecViewController.setKeyboardVisible(showKeyboard)
+	}
+
+	func disableOverlay() {
+		hideOverlay = true
+		showMenu = false
+	}
+
+	func toggleMute() {
+		muted.toggle()
+		CParsec.setMuted(muted)
+		if muted {
+			CParsec.pause(video: false, audio: true)
+		} else {
+			CParsec.resume()
+		}
+		if SettingsHandler.saveSessionSettings { SettingsHandler.savedMuted = muted }
+	}
+
+		/*func genDisplaySheet() -> ActionSheet
+	{
+		let len:Int = 16
+		var outputs = [ParsecOutput?](repeating:nil, count:len)
+		ParsecGetOutputs(&outputs, UInt32(len))
+		print("Listing \(outputs.count) displays")
+
+		func getDeviceName(_ output:ParsecOutput) -> String
+		{
+			return withUnsafePointer(to:output.device)
+			{
+				$0.withMemoryRebound(to: UInt8.self, capacity:MemoryLayout.size(ofValue:$0))
+				{
+					String(cString:$0)
+				}
+			}
+		}
+
+		let buttons = outputs.enumerated().map
+		{ i, output in
+			Alert.Button.default(Text("\(i) - \(getDeviceName(output))"), action:{print("Selected device \(i)")})
+		}
+		return ActionSheet(title: Text(L("Select a Display:")), buttons:buttons + [Alert.Button.cancel()])
+	}*/
+
+	func disconnect(isBackgroundDisconnect: Bool = false) {
+		appNote("[stream] disconnect\(isBackgroundDisconnect ? " in the background" : "")")
+		if !isBackgroundDisconnect {
+			ParsecBackgroundManager.shared.disableAutoReconnect()
+		}
+
+		if #available(iOS 15.0, *) {
+			PictureInPictureManager.shared.teardown()
+		}
+
+		CParsec.sendReleaseMessage()
+		CParsec.disconnect()
+		DataManager.model.output = "none"
+		CParsec.drawRate = 0
+		self.parsecViewController.glkView.cleanUp()
+
+		parsecViewController.scrollView.zoomScale = 1.0
+		parsecViewController.scrollView.contentOffset = .zero
+
+		if let c = controller {
+			c.setView(.main)
+		}
+	}
+
+	func changeResolution(res: ParsecResolution) {
+        SettingsHandler.resolution = res
+		DispatchQueue.main.async {
+			DataManager.model.resolutionX = res.width
+			DataManager.model.resolutionY = res.height
+			CParsec.updateHostVideoConfig()
+		}
+	}
+
+	func changeBitRate(bitrate: Int) {
+		SettingsHandler.bitrate = bitrate
+
+		DispatchQueue.main.async {
+			DataManager.model.bitrate = bitrate
+			CParsec.updateHostVideoConfig()
+		}
+	}
+
+	func toggleConstantFps() {
+		DispatchQueue.main.async {
+			DataManager.model.constantFps.toggle()
+			constantFps = DataManager.model.constantFps
+			CParsec.updateHostVideoConfig()
+			if SettingsHandler.saveSessionSettings { SettingsHandler.savedConstantFps = constantFps }
+		}
+	}
+
+	func toggleKeyboard() {
+		DispatchQueue.main.async {
+			showKeyboard.toggle()
+			parsecViewController.setKeyboardVisible(showKeyboard)
+		}
+	}
+
+	func toggleZoom() {
+		DispatchQueue.main.async {
+			zoomEnabled.toggle()
+			parsecViewController.setZoomEnabled(zoomEnabled)
+			if SettingsHandler.saveSessionSettings { SettingsHandler.savedZoomEnabled = zoomEnabled }
+		}
+	}
+
+	func changeDisplay(displayId: String) {
+		DispatchQueue.main.async {
+			DataManager.model.output = displayId
+			CParsec.updateHostVideoConfig()
+		}
+	}
+
+	func getHostUserData() {
+		let data = Data()
+		CParsec.sendUserData(type: .getVideoConfig, message: data)
+		CParsec.sendUserData(type: .getAdapterInfo, message: data)
+	}
+
+}
+
+// from https://github.com/utmapp/UTM/blob/117e3a962f2f46f7d847632d65fa7a85a2bb0cfa/Platform/iOS/VMWindowView.swift#L314
+private extension View {
+	func prefersPersistentSystemOverlaysHidden() -> some View {
+		if #available(iOS 16, *) {
+			return self.persistentSystemOverlays(.hidden)
+		} else {
+			return self
+		}
+	}
+}

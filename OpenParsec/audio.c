@@ -1,0 +1,340 @@
+#include "audio.h"
+
+#include <stdlib.h>
+
+#include <AudioToolbox/AudioToolbox.h>
+#include <stdatomic.h>
+#include <os/lock.h>
+
+#define NUM_AUDIO_BUF 16
+#define BUFFER_SIZE 4096
+#define SILENT_SIZE 4096
+#define FAKE_SIZE  0
+#define ALLOW_DELAY 8
+#define LOWEST_NUM_BUFFER 3
+_Atomic bool isMuted = false;
+_Atomic bool isHeld = false;
+_Atomic bool isStart = false;
+_Atomic int lastbuf = 0;
+
+typedef struct RecycleChain {
+    AudioQueueBufferRef *curt;
+    struct RecycleChain *next;
+}RecycleChain;
+
+typedef struct RecycleChainMgr {
+	RecycleChain *rc;
+	_Atomic(RecycleChain *) first;
+	_Atomic(RecycleChain *) last_to_queue;
+	//AudioQueueBufferRef *last_use;
+}RecycleChainMgr;
+
+struct audio {
+    AudioQueueRef q;
+    AudioQueueBufferRef audio_buf[NUM_AUDIO_BUF];
+	AudioQueueBufferRef silence_buf;
+	char *mem[NUM_AUDIO_BUF * 2];
+	int loc[NUM_AUDIO_BUF];
+	RecycleChainMgr rcm;
+	_Atomic int32_t fail_num;
+    _Atomic int32_t in_use;
+	_Atomic unsigned int silence_inqueue;
+	_Atomic unsigned int silence_outqueue;
+	os_unfair_lock clear_lock;
+};
+
+static inline UInt32 buffer_size_load(AudioQueueBufferRef buffer)
+{
+	return __atomic_load_n(&buffer->mAudioDataByteSize, __ATOMIC_ACQUIRE);
+}
+
+static inline void buffer_size_store(AudioQueueBufferRef buffer, UInt32 size)
+{
+	__atomic_store_n(&buffer->mAudioDataByteSize, size, __ATOMIC_RELEASE);
+}
+
+static void audio_queue_callback(void *opaque, AudioQueueRef queue, AudioQueueBufferRef buffer)
+{
+    struct audio *ctx = (struct audio *) opaque;
+    int deltaBuf = 0;
+	//int silence_use_count = (int)(silence_buf->mUserData);
+	
+    if (ctx == NULL)
+        return;
+    
+	if (ctx->in_use > 0)
+	{
+        ctx->in_use -= buffer_size_load(buffer);
+	}
+	
+    if(buffer != ctx->silence_buf)
+	{
+		buffer_size_store(buffer, FAKE_SIZE);
+		lastbuf = *((int *)(buffer->mUserData));	
+	}
+	else
+	{
+		//silence_use_count = 0;	
+		//silence_buf->mUserData = (void *)(0);
+		++ctx->silence_outqueue;
+	}
+	
+	if (isMuted) return;
+	
+	deltaBuf = *((int *)((*ctx->rcm.first->curt)->mUserData));
+	deltaBuf = deltaBuf - lastbuf - 1;
+	if (deltaBuf < 0) deltaBuf += NUM_AUDIO_BUF;
+	
+	while(ctx->rcm.last_to_queue->next != ctx->rcm.first)
+	{
+		AudioQueueEnqueueBuffer(ctx->q, (*(ctx->rcm.last_to_queue->next->curt)), 0, NULL);
+		ctx->rcm.last_to_queue = ctx->rcm.last_to_queue->next;
+	}
+	
+	int silencePending = (int)(ctx->silence_inqueue - ctx->silence_outqueue);
+	if (silencePending < 0)
+	{
+		ctx->silence_outqueue = ctx->silence_inqueue;
+		silencePending = 0;
+	}
+	if (deltaBuf + silencePending < LOWEST_NUM_BUFFER)
+	{
+		int numAddBuffer = LOWEST_NUM_BUFFER - deltaBuf - silencePending;
+		for (int i=0; i<numAddBuffer; ++i)
+		{
+			AudioQueueEnqueueBuffer(ctx->q, ctx->silence_buf, 0, NULL);
+		}
+		ctx->silence_inqueue += numAddBuffer;
+	}
+	
+	//RecycleChain *tmp = ctx->rcm.last_to_queue->next;
+	//if ( /*(*tmp->curt)->mAudioDataByteSize != FAKE_SIZE &&*/ tmp != ctx->rcm.first)
+	//if (deltaBuf > ALLOW_DELAY)
+	//{
+	//	//while(ctx->rcm.last_to_queue->next != ctx->rcm.first)
+	//	for (int i = 0; i < deltaBuf - ALLOW_DELAY + 1; ++i)
+	//	{
+	//	    AudioQueueEnqueueBuffer(ctx->q, (*(ctx->rcm.last_to_queue->next->curt)), 0, NULL);
+	//	    ctx->rcm.last_to_queue = ctx->rcm.last_to_queue->next;
+	//	}
+	//}
+	//else
+	//{
+	//	int silence_use_count = (int)(silence_buf->mUserData);
+	//	if ( deltaBuf > 0 )
+	//	{
+	//		AudioQueueEnqueueBuffer(ctx->q, (*(ctx->rcm.last_to_queue->next->curt)), 0, NULL);
+	//	    ctx->rcm.last_to_queue = ctx->rcm.last_to_queue->next;
+	//	}
+	//	else if (silence_use_count == 0)
+	//	{
+	//		AudioQueueEnqueueBuffer(ctx->q, silence_buf, 0, NULL);
+	//		//int tmp = (int)(silence_buf->mUserData);
+	//		//++tmp;
+	//		silence_buf->mUserData = (void *)(1);
+	//	}
+	//}
+	//else //if ((*ctx->rcm.last_use)->mAudioDataByteSize == FAKE_SIZE)
+	//{
+	//	AudioQueueEnqueueBuffer(ctx->q, silence_buf, 0, NULL);
+	//	AudioQueueEnqueueBuffer(ctx->q, silence_buf, 0, NULL);
+	//	AudioQueueEnqueueBuffer(ctx->q, silence_buf, 0, NULL);
+	//	/*AudioQueueStop(ctx->q, true);
+	//	isStart = false;
+	//	ctx->in_use = 0;*/
+	//}
+	
+	/*if(ctx->rcm.last_to_queue->curt == &buffer && ctx->rcm.last_to_queue->next == ctx->rcm.first) // && (*ctx->rcm.first->curt)->mAudioDataByteSize == FAKE_SIZE)
+	{
+		AudioQueueStop(ctx->q, true);
+		isStart = false;
+		ctx->in_use = 0;
+	}*/
+	
+	
+	//ctx->rcm.last->curt = &buffer;
+	
+    
+	
+    /*if (ctx->in_use == 0)
+        AudioQueueStop(ctx->q, true);*/
+}
+
+void audio_init(struct audio **ctx_out)
+{
+    struct audio *ctx = *ctx_out = calloc(1, sizeof(struct audio));
+    RecycleChain *rcTraverse = NULL;
+    AudioStreamBasicDescription format;
+    format.mSampleRate = 48000;
+    format.mFormatID = kAudioFormatLinearPCM;
+    format.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    format.mFramesPerPacket = 1;
+    format.mChannelsPerFrame = 2;
+    format.mBitsPerChannel = 16;
+    format.mBytesPerPacket = 4;
+    format.mBytesPerFrame = 4;
+    
+    // Create and audio playback queue
+    AudioQueueNewOutput(&format, audio_queue_callback, (void *) ctx, nil, nil, 0, &ctx->q);
+
+	//ctx->rcm.first = ctx->audio_buf[0];
+	//ctx->rcm.first  = ctx->audio_buf[NUM_AUDIO_BUF-1];
+	ctx->rcm.rc = (RecycleChain *)(&ctx->mem[0]);
+	ctx->rcm.first = ctx->rcm.rc;
+	rcTraverse = ctx->rcm.rc;
+    // Create buffers for the queue
+    for (int32_t x = 0; x < NUM_AUDIO_BUF; x++) {
+        AudioQueueAllocateBuffer(ctx->q, BUFFER_SIZE, &ctx->audio_buf[x]);
+        ctx->audio_buf[x]->mAudioDataByteSize = FAKE_SIZE;
+		ctx->loc[x] = x;
+		ctx->audio_buf[x]->mUserData = (void *)(&ctx->loc[x]);
+		rcTraverse->curt = &ctx->audio_buf[x];
+		if( x != NUM_AUDIO_BUF - 1)
+		{
+			rcTraverse->next = (RecycleChain *)(&ctx->mem[2*(x+1)]);
+			rcTraverse = rcTraverse->next;
+		}
+		else
+		{
+			//ctx->rcm.first = rcTraverse;
+			rcTraverse->next = ctx->rcm.rc;
+		}
+    }
+	isStart = false;
+	isHeld = false;
+	ctx->fail_num = 0;
+	ctx->in_use = 0;
+	
+	ctx->silence_inqueue = ctx->silence_outqueue = 0;
+	char silence[SILENT_SIZE] = {0};
+	AudioQueueAllocateBuffer(ctx->q, SILENT_SIZE, &ctx->silence_buf);
+	memcpy(ctx->silence_buf->mAudioData, &silence[0], SILENT_SIZE);
+    ctx->silence_buf->mAudioDataByteSize = SILENT_SIZE;
+	ctx->silence_buf->mUserData = NULL;
+}
+
+void audio_destroy(struct audio **ctx_out)
+{
+    if (!ctx_out || !*ctx_out)
+        return;
+    
+    struct audio *ctx = *ctx_out;
+    //AudioQueueStop(ctx->q, true);
+	
+    for (int32_t x = 0; x < NUM_AUDIO_BUF; x++) {
+        if (ctx->audio_buf[x])
+            AudioQueueFreeBuffer(ctx->q, ctx->audio_buf[x]);
+    }
+    
+    if (ctx->q)
+        AudioQueueDispose(ctx->q, true);
+
+    free(ctx);
+    *ctx_out = NULL;
+	isStart = false;
+}
+
+void audio_clear(struct audio **ctx_out)
+{
+    if (!ctx_out || !*ctx_out)
+        return;
+    
+	//RecycleChain *rcTraverse = NULL;
+    struct audio *ctx = *ctx_out;
+	os_unfair_lock_lock(&ctx->clear_lock);
+    if (ctx->q)
+        AudioQueueStop(ctx->q, true);
+    
+	//rcTraverse = ctx->rcm.rc;
+	for (int32_t x = 0; x < NUM_AUDIO_BUF; x++) {
+        buffer_size_store(ctx->audio_buf[x], FAKE_SIZE);
+		/*rcTraverse->curt = &ctx->audio_buf[x];
+		if( x != NUM_AUDIO_BUF - 1)
+		{
+			rcTraverse->next = (RecycleChain *)(&ctx->mem[2*(x+1)]);
+			rcTraverse = rcTraverse->next;
+		}
+		else
+		{
+			ctx->rcm.first = rcTraverse;
+			rcTraverse->next = NULL;
+		}*/
+    }
+	isStart = false;
+	ctx->in_use = 0;
+	ctx->fail_num = 0;
+	ctx->silence_inqueue = ctx->silence_outqueue = 0;
+	os_unfair_lock_unlock(&ctx->clear_lock);
+}
+
+void audio_cb(const int16_t *pcm, uint32_t frames, void *opaque)
+{
+    if ( frames == 0 || opaque == NULL || isMuted || isHeld )
+		return;
+	
+	struct audio *ctx = (struct audio *) opaque;
+    AudioQueueBufferRef *find_idle = NULL;
+	
+	find_idle = ctx->rcm.first->curt;
+	if (buffer_size_load(*find_idle) != FAKE_SIZE)
+	{
+		++ctx->fail_num;
+		if(ctx->fail_num > 10) audio_clear(&ctx);	
+		return;
+	}
+	
+    // The idle buffer is a fixed BUFFER_SIZE (4096-byte) AudioQueue
+    // allocation, but `frames` is host-supplied and unbounded. Normal ~10ms
+    // chunks are well under 1024 stereo frames, so this clamp is a no-op on
+    // the happy path — but a post-stall recovery on a flaky link can deliver
+    // an oversized chunk, and `frames * 4 > BUFFER_SIZE` would memcpy past the
+    // buffer (heap overflow → crash/corruption). Clamp to what fits; playing a
+    // truncated chunk is strictly better than overrunning the allocation.
+    uint32_t bytes = frames * 4;
+    if (bytes > BUFFER_SIZE) bytes = BUFFER_SIZE;
+    memcpy((*find_idle)->mAudioData, pcm, bytes);
+    buffer_size_store(*find_idle, bytes);
+	
+	if(!isStart)
+	{
+		ctx->rcm.last_to_queue = ctx->rcm.first;
+		AudioQueueEnqueueBuffer(ctx->q, (*find_idle), 0, NULL);
+	}
+
+	ctx->fail_num = 0;
+	ctx->rcm.first = ctx->rcm.first->next;
+	//ctx->rcm.last_use = find_idle;
+	
+	ctx->in_use += frames;
+	//if (!isStart && (ctx->in_use > 1600))
+	if (ctx->in_use > 1000)
+	{
+		AudioQueueStart(ctx->q, NULL);
+		isStart = true;
+	}
+}
+
+void audio_mute(bool muted, const void *opaque)
+{
+	if (isMuted == muted) return;
+	isMuted = muted;
+	isStart = false;
+	if (opaque == NULL)	return;
+	
+	struct audio *ctx = (struct audio *) opaque;
+	if(ctx->q == NULL) return;
+	if(isMuted)
+	{
+		AudioQueuePause(ctx->q);
+		audio_clear(&ctx);
+	}
+}
+
+void audio_hold(bool held, const void *opaque)
+{
+	isHeld = held;
+	if (!held || opaque == NULL) return;
+
+	struct audio *ctx = (struct audio *) opaque;
+	audio_clear(&ctx);
+}
