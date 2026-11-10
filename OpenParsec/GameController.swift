@@ -164,6 +164,7 @@ final class GamepadController: ObservableObject {
 
 	private func bind(_ controller: GCController, id: UInt32) {
 		guard let pad = controller.extendedGamepad else { return }
+		aimTriggerHeld = false
 
 		func button(_ physical: PhysicalButton, _ input: GCControllerButtonInput?) {
 			input?.pressedChangedHandler = { [weak self] _, _, pressed in
@@ -442,6 +443,8 @@ final class GyroController: ObservableObject {
 	private var samples = 0
 	private var lastStickX: Float = 0
 	private var lastStickY: Float = 0
+	/// 上一次的输出目标，用于"从右摇杆切走时补发一次归零"
+	private var lastTarget: GyroTarget = .mouse
 	/// 0.5s @ 100Hz
 	private let calibrationTarget = 50
 
@@ -459,9 +462,11 @@ final class GyroController: ObservableObject {
 		return motion.isDeviceMotionAvailable
 	}
 
-	/// 是否由陀螺仪接管右摇杆（此时手柄自己的右摇杆由这里统一发送，两者叠加）
+	/// 是否由陀螺仪接管右摇杆（此时手柄自己的右摇杆由这里统一发送，两者叠加）。
+	/// 必须带上 running：陀螺仪没真正跑起来时（未串流 / 设备无陀螺仪 / 已停止），
+	/// 否则手柄右摇杆会被吞掉、完全不响应。
 	var ownsRightStick: Bool {
-		return SettingsHandler.gyroEnabled && SettingsHandler.gyroTarget == .rightStick
+		return running && SettingsHandler.gyroEnabled && SettingsHandler.gyroTarget == .rightStick
 	}
 
 	/// 按住 L2 才输出；没接手柄时无法按 L2，直接放行
@@ -507,17 +512,24 @@ final class GyroController: ObservableObject {
 			return
 		}
 		guard running else { return }
+		// 注意顺序：running 置 false 后 ownsRightStick 就会变 false，所以先记下来
+		let wasOwningRightStick = SettingsHandler.gyroEnabled && SettingsHandler.gyroTarget == .rightStick
 		running = false
 		motion.stopDeviceMotionUpdates()
-		if ownsRightStick {
+		if wasOwningRightStick {
 			// 交还控制权前先把摇杆归零，避免卡在推满状态
 			sendStick(0, 0, force: true)
 		}
 		statusText = SettingsHandler.gyroEnabled ? L("Stopped") : L("Off")
 	}
 
-	/// 「归中」= 重新做一次零偏校准，顺便清掉滤波残量
+	/// 「归中」= 重新做一次零偏校准，顺便清掉滤波残量。
+	/// 没在运行时不要进入校准状态，否则会一直显示"校准中"且永远凑不满样本。
 	func recenter() {
+		guard running else {
+			statusText = SettingsHandler.gyroEnabled ? L("Waiting for stream") : L("Off")
+			return
+		}
 		beginCalibration()
 	}
 
@@ -534,6 +546,15 @@ final class GyroController: ObservableObject {
 	private func handle(_ data: CMDeviceMotion?) {
 		guard running, let d = data else { return }
 		guard SettingsHandler.gyroEnabled else { stop(); return }
+
+		// 输出目标从"右摇杆"切到"鼠标"时，主机侧的右摇杆会停在最后一个值上，
+		// 这里补发一次归零，否则视角会自己一直飘。
+		if SettingsHandler.gyroTarget != lastTarget {
+			if lastTarget == .rightStick {
+				sendStick(0, 0, force: true)
+			}
+			lastTarget = SettingsHandler.gyroTarget
+		}
 
 		guard let frame = rotationFrame(data: d) else { return }
 		var h = frame.h
@@ -609,8 +630,13 @@ final class GyroController: ObservableObject {
 		   let controllerMotion = GamepadController.shared.orderedControllers.first?.motion {
 			let r = controllerMotion.rotationRate
 			let g = controllerMotion.gravity
-			rate = SIMD3<Double>(r.x, r.y, r.z)
-			gravity = SIMD3<Double>(g.x, g.y, g.z)
+			// 没有 IMU 的手柄（例如 GameSir G8+）也会返回一个 GCDeviceMotion，但数值全是 0。
+			// 重力模长能区分：真实 IMU 静止时重力也有约 1g，全零说明这只手柄没有传感器。
+			let gravityMagnitude = simd_length(SIMD3<Double>(g.x, g.y, g.z))
+			if gravityMagnitude > 0.3 {
+				rate = SIMD3<Double>(r.x, r.y, r.z)
+				gravity = SIMD3<Double>(g.x, g.y, g.z)
+			}
 		}
 
 		let up = gravity * -1.0

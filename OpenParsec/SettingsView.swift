@@ -205,6 +205,10 @@ struct SettingsView: View {
 							CatItem(L("Second Controller")) {
 								Toggle("", isOn: $gamepadSecondController)
 									.frame(width: 80)
+									.onChange(of: gamepadSecondController) { _ in
+										// 立刻按新的上限重新绑定，不用等下一次插拔
+										GamepadController.shared.registerControllerHandler()
+									}
 							}
 							CatItem(L("Rumble Test")) {
 								Button(L("Test")) { gamepad.testHaptics() }
