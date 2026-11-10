@@ -93,7 +93,7 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
 
 		self.glkView = ParsecGLKViewController(viewController: self, updateImage: { [weak self] in self?.updateImage() })
 
-		self.gamePadController = GamepadController()
+		self.gamePadController = GamepadController.shared
 		self.touchController = TouchController()
 	}
 

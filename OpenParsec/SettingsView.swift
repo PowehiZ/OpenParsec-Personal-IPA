@@ -5,6 +5,8 @@ struct SettingsView: View {
 
 	// 语言切换：值存在 SettingsHandler.appLanguage，LanguageStore 负责广播给所有页面
 	@ObservedObject private var language = LanguageStore.shared
+	// 手柄状态：已连接设备、电量、最后按下的键
+	@ObservedObject private var gamepad = GamepadController.shared
 
 	// @State var renderer:RendererType = SettingsHandler.renderer
 	@AppStorage("resolution") var resolution: ParsecResolution = .client
@@ -28,6 +30,11 @@ struct SettingsView: View {
 	@AppStorage("startMuted") var startMuted: Bool = false
 	@AppStorage("autoReconnect") var autoReconnect: Bool = true
 	@AppStorage("errorPrompts") var errorPrompts: Bool = false
+	@AppStorage("gamepadDeadzone") var gamepadDeadzone: Double = 0.0
+	@AppStorage("gamepadInvertLeftY") var gamepadInvertLeftY: Bool = false
+	@AppStorage("gamepadInvertRightY") var gamepadInvertRightY: Bool = false
+	@AppStorage("gamepadSwapABXY") var gamepadSwapABXY: Bool = false
+	@AppStorage("gamepadSecondController") var gamepadSecondController: Bool = false
 
 	let resolutionChoices: [Choice<ParsecResolution>]
 
@@ -144,6 +151,51 @@ struct SettingsView: View {
 							CatItem(L("Option Key as Command")) {
 								Toggle("", isOn: $optionAsCommand)
 									.frame(width: 80)
+							}
+						}
+						CatTitle(L("Gamepad"))
+						CatList {
+							CatItem(L("Status")) {
+								Text(gamepad.statusText)
+									.lineLimit(1)
+									.font(.system(size: 14))
+							}
+							if !gamepad.batteryText.isEmpty {
+								CatItem(L("Battery")) {
+									Text(gamepad.batteryText)
+										.font(.system(size: 14))
+								}
+							}
+							// 按下手柄任意键，这里会实时显示"物理键 → 实际发出的键"，用来排查键位问题
+							CatItem(L("Button Test")) {
+								Text(gamepad.lastEvent)
+									.lineLimit(1)
+									.font(.system(size: 13))
+									.opacity(0.75)
+							}
+							CatItem(L("Deadzone")) {
+								Slider(value: $gamepadDeadzone, in: 0...0.5, step: 0.05)
+									.frame(width: 160)
+								Text(String(format: "%.2f", gamepadDeadzone))
+							}
+							CatItem(L("Invert Left Y")) {
+								Toggle("", isOn: $gamepadInvertLeftY)
+									.frame(width: 80)
+							}
+							CatItem(L("Invert Right Y")) {
+								Toggle("", isOn: $gamepadInvertRightY)
+									.frame(width: 80)
+							}
+							CatItem(L("Swap A/B and X/Y")) {
+								Toggle("", isOn: $gamepadSwapABXY)
+									.frame(width: 80)
+							}
+							CatItem(L("Second Controller")) {
+								Toggle("", isOn: $gamepadSecondController)
+									.frame(width: 80)
+							}
+							CatItem(L("Rumble Test")) {
+								Button(L("Test")) { gamepad.testHaptics() }
 							}
 						}
 						CatTitle(L("Graphics"))

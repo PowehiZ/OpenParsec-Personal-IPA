@@ -32,4 +32,11 @@ struct SettingsHandler {
 	@AppStorage("savedConstantFps") public static var savedConstantFps: Bool = false
 	@AppStorage("savedMuted") public static var savedMuted: Bool = false
 
+	// 手柄
+	@AppStorage("gamepadDeadzone") public static var gamepadDeadzone: Double = 0.0
+	@AppStorage("gamepadInvertLeftY") public static var gamepadInvertLeftY: Bool = false
+	@AppStorage("gamepadInvertRightY") public static var gamepadInvertRightY: Bool = false
+	@AppStorage("gamepadSwapABXY") public static var gamepadSwapABXY: Bool = false
+	@AppStorage("gamepadSecondController") public static var gamepadSecondController: Bool = false
+
 }
