@@ -228,6 +228,8 @@ jobs:
       - name: Publish to nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 这个 job 没有 checkout，gh 无法从 git remote 推断仓库，必须显式指定
+          GH_REPO: ${{ github.repository }}
         run: |
           set +e
           ls -lh out
