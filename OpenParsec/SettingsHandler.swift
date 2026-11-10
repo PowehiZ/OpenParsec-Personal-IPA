@@ -39,4 +39,14 @@ struct SettingsHandler {
 	@AppStorage("gamepadSwapABXY") public static var gamepadSwapABXY: Bool = false
 	@AppStorage("gamepadSecondController") public static var gamepadSecondController: Bool = false
 
+	// 陀螺仪（Parsec 协议没有陀螺仪通道，只能是"模拟"输出）
+	@AppStorage("gyroEnabled") public static var gyroEnabled: Bool = false
+	@AppStorage("gyroTarget") public static var gyroTarget: GyroTarget = .mouse
+	@AppStorage("gyroSensitivityH") public static var gyroSensitivityH: Double = 1.0
+	@AppStorage("gyroSensitivityV") public static var gyroSensitivityV: Double = 1.0
+	@AppStorage("gyroDeadzone") public static var gyroDeadzone: Double = 0.02
+	@AppStorage("gyroSmoothing") public static var gyroSmoothing: Double = 0.3
+	@AppStorage("gyroInvertH") public static var gyroInvertH: Bool = false
+	@AppStorage("gyroInvertV") public static var gyroInvertV: Bool = false
+
 }

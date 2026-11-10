@@ -7,6 +7,8 @@ struct SettingsView: View {
 	@ObservedObject private var language = LanguageStore.shared
 	// 手柄状态：已连接设备、电量、最后按下的键
 	@ObservedObject private var gamepad = GamepadController.shared
+	// 陀螺仪状态
+	@ObservedObject private var gyro = GyroController.shared
 
 	// @State var renderer:RendererType = SettingsHandler.renderer
 	@AppStorage("resolution") var resolution: ParsecResolution = .client
@@ -35,6 +37,14 @@ struct SettingsView: View {
 	@AppStorage("gamepadInvertRightY") var gamepadInvertRightY: Bool = false
 	@AppStorage("gamepadSwapABXY") var gamepadSwapABXY: Bool = false
 	@AppStorage("gamepadSecondController") var gamepadSecondController: Bool = false
+	@AppStorage("gyroEnabled") var gyroEnabled: Bool = false
+	@AppStorage("gyroTarget") var gyroTarget: GyroTarget = .mouse
+	@AppStorage("gyroSensitivityH") var gyroSensitivityH: Double = 1.0
+	@AppStorage("gyroSensitivityV") var gyroSensitivityV: Double = 1.0
+	@AppStorage("gyroDeadzone") var gyroDeadzone: Double = 0.02
+	@AppStorage("gyroSmoothing") var gyroSmoothing: Double = 0.3
+	@AppStorage("gyroInvertH") var gyroInvertH: Bool = false
+	@AppStorage("gyroInvertV") var gyroInvertV: Bool = false
 
 	let resolutionChoices: [Choice<ParsecResolution>]
 
@@ -196,6 +206,65 @@ struct SettingsView: View {
 							}
 							CatItem(L("Rumble Test")) {
 								Button(L("Test")) { gamepad.testHaptics() }
+							}
+						}
+						CatTitle(L("Gyro"))
+						CatList {
+							CatItem(L("Enable")) {
+								Toggle("", isOn: $gyroEnabled)
+									.frame(width: 80)
+									.onChange(of: gyroEnabled) { on in
+										if on {
+											GyroController.shared.startIfNeeded()
+										} else {
+											GyroController.shared.stop()
+										}
+									}
+							}
+							CatItem(L("Output")) {
+								SegmentPicker(selection: $gyroTarget, options:
+								[
+									Choice(L("Mouse"), GyroTarget.mouse),
+									Choice(L("Right Stick"), GyroTarget.rightStick)
+								])
+								.frame(width: 170)
+							}
+							CatItem(L("Status")) {
+								Text(gyro.statusText)
+									.lineLimit(1)
+									.font(.system(size: 13))
+									.opacity(0.8)
+							}
+							CatItem(L("Horizontal Sensitivity")) {
+								Slider(value: $gyroSensitivityH, in: 0.2...4, step: 0.1)
+									.frame(width: 150)
+								Text(String(format: "%.1f", gyroSensitivityH))
+							}
+							CatItem(L("Vertical Sensitivity")) {
+								Slider(value: $gyroSensitivityV, in: 0.2...4, step: 0.1)
+									.frame(width: 150)
+								Text(String(format: "%.1f", gyroSensitivityV))
+							}
+							CatItem(L("Deadzone")) {
+								Slider(value: $gyroDeadzone, in: 0...0.15, step: 0.005)
+									.frame(width: 150)
+								Text(String(format: "%.3f", gyroDeadzone))
+							}
+							CatItem(L("Smoothing")) {
+								Slider(value: $gyroSmoothing, in: 0...0.9, step: 0.05)
+									.frame(width: 150)
+								Text(String(format: "%.2f", gyroSmoothing))
+							}
+							CatItem(L("Invert Horizontal")) {
+								Toggle("", isOn: $gyroInvertH)
+									.frame(width: 80)
+							}
+							CatItem(L("Invert Vertical")) {
+								Toggle("", isOn: $gyroInvertV)
+									.frame(width: 80)
+							}
+							CatItem(L("Recenter")) {
+								Button(L("Recenter")) { GyroController.shared.recenter() }
 							}
 						}
 						CatTitle(L("Graphics"))

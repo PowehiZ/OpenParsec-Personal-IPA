@@ -44,6 +44,8 @@ class ParsecBackgroundManager {
 		didDisconnectDueToBackground = false
 		isReconnecting = false
 		isPaused = false
+		// 陀螺仪只在串流期间运行，避免空转耗电
+		GyroController.shared.startIfNeeded()
 	}
 
 	func connectionDidGoLive(peerId: String, hostname: String) {
@@ -54,12 +56,14 @@ class ParsecBackgroundManager {
 	func connectionDidEnd() {
 		hasActiveConnection = false
 		isPaused = false
+		GyroController.shared.stop()
 	}
 
 	func sceneWillResignActive() {
 	}
 
 	func sceneDidBecomeActive() {
+		GyroController.shared.startIfNeeded()
 		// Takes priority over isPiPActive check because stopPiP() is async
 		if didDisconnectDueToBackground, let peerId = lastPeerId {
 			didDisconnectDueToBackground = false
@@ -72,6 +76,7 @@ class ParsecBackgroundManager {
 	}
 
 	func sceneDidEnterBackground() {
+		GyroController.shared.stop()
 		if hasActiveConnection && !isPaused {
 			var pipAttempted = false
 			if #available(iOS 15.0, *) {
