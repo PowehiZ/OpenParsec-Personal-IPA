@@ -455,8 +455,7 @@ struct MainView: View {
 		withAnimation {
 			isRefreshing = true
 
-			let clinfo = NetworkHandler.clinfo
-			if clinfo == nil {
+			guard let clinfo = NetworkHandler.clinfo else {
 				isRefreshing = false
 				baseAlertText = L("Error gathering hosts: %@", L("Invalid session"))
 				showBaseAlert = true
@@ -468,7 +467,7 @@ struct MainView: View {
 			var request = URLRequest(url: apiURL)
 			request.httpMethod = "GET"
 			request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-			request.setValue("Bearer \(clinfo!.session_id)", forHTTPHeaderField: "Authorization")
+			request.setValue("Bearer \(clinfo.session_id)", forHTTPHeaderField: "Authorization")
 			request.setValue("parsec/150-93b Windows/11 libmatoya/4.0", forHTTPHeaderField: "User-Agent")
 
 			let task = URLSession.shared.dataTask(with: request) { (data, response, _) in
@@ -513,8 +512,7 @@ struct MainView: View {
 
 	func refreshSelf() {
 		withAnimation {
-			let clinfo = NetworkHandler.clinfo
-			if clinfo == nil {
+			guard let clinfo = NetworkHandler.clinfo else {
 				return
 			}
 
@@ -523,7 +521,7 @@ struct MainView: View {
 			var request = URLRequest(url: apiURL)
 			request.httpMethod = "GET"
 			request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-			request.setValue("Bearer \(clinfo!.session_id)", forHTTPHeaderField: "Authorization")
+			request.setValue("Bearer \(clinfo.session_id)", forHTTPHeaderField: "Authorization")
 			request.setValue("parsec/150-93b Windows/11 libmatoya/4.0", forHTTPHeaderField: "User-Agent")
 
 			let task = URLSession.shared.dataTask(with: request) { (data, response, _) in
@@ -554,8 +552,7 @@ struct MainView: View {
 
 	func refreshFriends() {
 		withAnimation {
-			let clinfo = NetworkHandler.clinfo
-			if clinfo == nil {
+			guard let clinfo = NetworkHandler.clinfo else {
 				return
 			}
 
@@ -564,7 +561,7 @@ struct MainView: View {
 			var request = URLRequest(url: apiURL)
 			request.httpMethod = "GET"
 			request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-			request.setValue("Bearer \(clinfo!.session_id)", forHTTPHeaderField: "Authorization")
+			request.setValue("Bearer \(clinfo.session_id)", forHTTPHeaderField: "Authorization")
 			request.setValue("parsec/150-93b Windows/11 libmatoya/4.0", forHTTPHeaderField: "User-Agent")
 
 			let task = URLSession.shared.dataTask(with: request) { (data, response, _) in

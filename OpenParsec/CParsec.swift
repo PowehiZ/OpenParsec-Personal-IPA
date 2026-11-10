@@ -183,165 +183,193 @@ protocol ParsecService {
 }
 
 class CParsec {
+	/// Parsec 实例。
+	///
+	/// 原来这里是 `ParsecService!`（隐式解包）：还没连过任何主机、或已销毁时，
+	/// 任何一个调用点都会直接崩；而且事件线程与主线程读写没有任何同步。
+	/// 现在改成「可选 + 锁保护」，所有转发方法都做 nil 短路，调用方不需要再判空。
+	private static let implLock = NSLock()
+	private static var _impl: ParsecService?
+
+	static var impl: ParsecService? {
+		implLock.lock()
+		defer { implLock.unlock() }
+		return _impl
+	}
+
+	private static func setImpl(_ newValue: ParsecService?) {
+		implLock.lock()
+		_impl = newValue
+		implLock.unlock()
+	}
+
+	/// 兼容旧引用名（只读）
+	static var parsecImpl: ParsecService? {
+		return impl
+	}
+
 	public static var hostWidth: Float {
-		return parsecImpl.hostWidth
+		return impl?.hostWidth ?? 0
 	}
 	public static var hostHeight: Float {
-		return parsecImpl.hostHeight
+		return impl?.hostHeight ?? 0
 	}
 
 	public static var clientWidth: Float {
-		return parsecImpl.clientWidth
+		return impl?.clientWidth ?? 0
 	}
 	public static var clientHeight: Float {
-		return parsecImpl.clientHeight
+		return impl?.clientHeight ?? 0
 	}
 
 	public static var mouseInfo: MouseInfo {
-		return parsecImpl.mouseInfo
+		return impl?.mouseInfo ?? MouseInfo()
 	}
 
 	static var drawRate: Double = 0
 
-	static var parsecImpl: ParsecService!
-
 	/// 是否已创建 Parsec 实例。输入事件（手柄/键盘/鼠标）可能早于连接到达，
-	/// 这时 `parsecImpl` 还是 nil，直接发消息会崩，必须先判空。
+	/// 这时没有实例，直接发消息会崩，必须先判空。
 	static var hasInstance: Bool {
-		return parsecImpl != nil
+		return impl != nil
 	}
 
 	/// 创建（或重建）Parsec 实例。
 	///
 	/// 旧实例必须先显式 shutdown：`ParsecSDKBridge` 的 audio / event 两条轮询循环
 	/// 用 `let self = self` 持有实例，只有 generation 变了才会退出。直接覆盖
-	/// `parsecImpl` 会让旧实例既无法 deinit（ParsecDestroy / audio_destroy 不会执行），
+	/// 实例会让旧实例既无法 deinit（ParsecDestroy / audio_destroy 不会执行），
 	/// 两条循环还会继续轮询一个已"属于过去"的 client。
 	static func initialize() {
 		destroy()
-		parsecImpl = ParsecSDKBridge()
+		let bridge = ParsecSDKBridge()
+		// 初始化失败（没拿到 _parsec / _audio）时不要把半成品挂上去
+		if bridge.isUsable {
+			setImpl(bridge)
+		}
 	}
 
 	/// 释放 Parsec 实例，重复调用安全。
 	static func destroy() {
-		guard let impl = parsecImpl else { return }
-		parsecImpl = nil   // 先摘掉门面，之后的 CParsec 调用不会落到旧实例上
-		impl.shutdown()    // 主动停轮询；deinit 里的 ParsecDestroy 才能真的被执行
+		guard let old = impl else { return }
+		setImpl(nil)     // 先摘掉门面，之后的 CParsec 调用不会落到旧实例上
+		old.shutdown()   // 主动停轮询；deinit 里的 ParsecDestroy 才能真的被执行
 	}
 
 	static func connect(_ peerID: String) -> ParsecStatus {
-		parsecImpl.connect(peerID)
+		return impl?.connect(peerID) ?? PARSEC_NOT_RUNNING
 	}
 
 	static func disconnect() {
-		parsecImpl.disconnect()
+		impl?.disconnect()
 	}
 
 	static func getStatus() -> ParsecStatus {
-		return parsecImpl.getStatus()
+		return impl?.getStatus() ?? PARSEC_NOT_RUNNING
 	}
 
-    static func getStatusEx(_ pcs: inout ParsecClientStatus) -> ParsecStatus {
-		return parsecImpl.getStatusEx(&pcs)
+	static func getStatusEx(_ pcs: inout ParsecClientStatus) -> ParsecStatus {
+		guard let impl = impl else { return PARSEC_NOT_RUNNING }
+		return impl.getStatusEx(&pcs)
 	}
 
 	static func setFrame(_ width: CGFloat, _ height: CGFloat, _ scale: CGFloat ) {
-		parsecImpl.setFrame(width, height, scale)
+		impl?.setFrame(width, height, scale)
 	}
 
 	static func renderGLFrame(timeout: UInt32 = 16) { // timeout in ms, 16 == 60 FPS, 8 == 120 FPS, etc.
-		parsecImpl.renderGLFrame(timeout: timeout)
+		impl?.renderGLFrame(timeout: timeout)
 	}
 
 	static func glDestroy() {
-		parsecImpl.glDestroy()
+		impl?.glDestroy()
 	}
 
 	static func setMuted(_ muted: Bool) {
-		parsecImpl.setMuted(muted)
+		impl?.setMuted(muted)
 	}
 
 	static func applyConfig() {
-		parsecImpl.applyConfig()
+		impl?.applyConfig()
 	}
 
 	static func updateHostVideoConfig() {
-		parsecImpl.updateHostVideoConfig()
+		impl?.updateHostVideoConfig()
 	}
 
 	static func sendMouseMessage(_ button: ParsecMouseButton, _ x: Int32, _ y: Int32, _ pressed: Bool) {
-		parsecImpl.sendMouseMessage(button, x, y, pressed)
+		impl?.sendMouseMessage(button, x, y, pressed)
 	}
 
 	static func sendMouseClickMessage(_ button: ParsecMouseButton, _ pressed: Bool) {
-		parsecImpl.sendMouseClickMessage(button, pressed)
+		impl?.sendMouseClickMessage(button, pressed)
 	}
 
 	static func sendMouseDelta(_ dx: Int32, _ dy: Int32) {
-		parsecImpl.sendMouseDelta(dx, dy)
+		impl?.sendMouseDelta(dx, dy)
 	}
 
 	static func sendMousePosition(_ x: Int32, _ y: Int32) {
-		parsecImpl.sendMousePosition(x, y)
+		impl?.sendMousePosition(x, y)
 	}
 
 	static func sendKeyboardMessage(event: KeyBoardKeyEvent) {
-		parsecImpl.sendKeyboardMessage(event: event)
+		impl?.sendKeyboardMessage(event: event)
 	}
 
 	static func sendKeyboardMessage(keyCode: UInt32, pressed: Bool)
 	{
-		parsecImpl.sendKeyboardMessage(keyCode: keyCode, pressed: pressed)
+		impl?.sendKeyboardMessage(keyCode: keyCode, pressed: pressed)
 	}
 
 	static func sendVirtualKeyboardInput(text: String) {
-		parsecImpl.sendVirtualKeyboardInput(text: text)
+		impl?.sendVirtualKeyboardInput(text: text)
 	}
 
 	static func sendVirtualKeyboardInput(text: String, isOn: Bool) {
-		parsecImpl.sendVirtualKeyboardInput(text: text, isOn: isOn)
+		impl?.sendVirtualKeyboardInput(text: text, isOn: isOn)
 	}
 
 	static func sendGameControllerButtonMessage(controllerId: UInt32, _ button: ParsecGamepadButton, pressed: Bool) {
-		parsecImpl.sendGameControllerButtonMessage(controllerId: controllerId, button, pressed: pressed)
+		impl?.sendGameControllerButtonMessage(controllerId: controllerId, button, pressed: pressed)
 	}
 
 	static func sendGameControllerAxisMessage(controllerId: UInt32, _ button: ParsecGamepadAxis, _ value: Int16) {
-		parsecImpl.sendGameControllerAxisMessage(controllerId: controllerId, button, value)
+		impl?.sendGameControllerAxisMessage(controllerId: controllerId, button, value)
 	}
 
 	static func sendGameControllerUnplugMessage(controllerId: UInt32) {
-		parsecImpl.sendGameControllerUnplugMessage(controllerId: controllerId)
+		impl?.sendGameControllerUnplugMessage(controllerId: controllerId)
 	}
 
 	static func sendWheelMsg(x: Int32, y: Int32) {
-		parsecImpl.sendWheelMsg(x: x, y: y)
+		impl?.sendWheelMsg(x: x, y: y)
 	}
 
 	static func sendUserData(type: ParsecUserDataType, message: Data) {
-		parsecImpl.sendUserData(type: type, message: message)
+		impl?.sendUserData(type: type, message: message)
 	}
 
 	static func sendReleaseMessage() {
-		parsecImpl.sendReleaseMessage()
+		impl?.sendReleaseMessage()
 	}
 
 	@discardableResult
 	static func reconnect(_ peerID: String) -> ParsecStatus {
-		return parsecImpl.reconnect(peerID)
+		return impl?.reconnect(peerID) ?? PARSEC_NOT_RUNNING
 	}
 
 	@discardableResult
 	static func pause(video: Bool = true, audio: Bool = true) -> ParsecStatus {
-		return parsecImpl.pause(video: video, audio: audio)
+		return impl?.pause(video: video, audio: audio) ?? PARSEC_NOT_RUNNING
 	}
 
 	@discardableResult
 	static func resume() -> ParsecStatus {
-		return parsecImpl.resume()
+		return impl?.resume() ?? PARSEC_NOT_RUNNING
 	}
 
-	static func getImpl() -> ParsecService {
-		return parsecImpl
+	static func getImpl() -> ParsecService? {
+		return impl
 	}
 }

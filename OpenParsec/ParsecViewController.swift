@@ -144,11 +144,11 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
         lastMouseY = currentMouseY
         lastCursorHidden = currentHidden
 
-		if currentImg != nil && !currentHidden {
+		if let img = currentImg, !currentHidden {
 			u?.isHidden = false
 			if lastImg != currentImg {
-				u!.image = UIImage(cgImage: currentImg!)
-				lastImg = currentImg!
+				u?.image = UIImage(cgImage: img)
+				lastImg = img
 			}
 
 			// While dragging, the touch handler owns the cursor position and viewport (smooth,
@@ -169,8 +169,8 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
 					// Not zoomed: keep the cursor above the on-screen keyboard.
 					let margin: CGFloat = 50.0
 					let effectiveViewHeight = view.bounds.height - keyboardHeight
-					if u!.frame.maxY > effectiveViewHeight - margin {
-						let diff = u!.frame.maxY - (effectiveViewHeight - margin)
+					if let cursor = u, cursor.frame.maxY > effectiveViewHeight - margin {
+						let diff = cursor.frame.maxY - (effectiveViewHeight - margin)
 						let maxOffsetY = max(0, scrollView.contentSize.height - scrollView.bounds.height + scrollView.contentInset.bottom)
 						let targetOffsetY = min(scrollView.contentOffset.y + diff, maxOffsetY)
 						scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetOffsetY), animated: false)
@@ -243,9 +243,10 @@ class ParsecViewController: UIViewController, UIScrollViewDelegate, ParsecTouchI
 
 		// Cursor is a screen-space overlay ON TOP of everything (not inside the scroll view), so the
 		// zoom transform never scales it - keeping it crisp and a constant on-screen size.
-		u = UIImageView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-		u!.isUserInteractionEnabled = false
-		view.addSubview(u!)
+		let cursorView = UIImageView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+		cursorView.isUserInteractionEnabled = false
+		view.addSubview(cursorView)
+		u = cursorView
 
 		setNeedsUpdateOfPrefersPointerLocked()
 

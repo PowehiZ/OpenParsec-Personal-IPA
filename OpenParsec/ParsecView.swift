@@ -68,7 +68,7 @@ struct ParsecStatusBar: View {
 
 		if status == PARSEC_OK && pcs.networkFailure && !isReconnecting && !pipActive {
 			if networkFailureSince == nil { networkFailureSince = Date() }
-			let lost = Date().timeIntervalSince(networkFailureSince!)
+			let lost = Date().timeIntervalSince(networkFailureSince ?? Date())
 			let justResumed = Date().timeIntervalSince(ParsecBackgroundManager.shared.resumedAt ?? .distantPast) < 10
 			connectionLost = true
 			if lost >= 3 || justResumed {

@@ -47,6 +47,12 @@ class ParsecSDKBridge: ParsecService {
 	private var _audio: OpaquePointer!
 	private let _audioPtr: UnsafeRawPointer
 
+	/// ParsecInit / audio_init 是否真的拿到了指针。
+	/// 拿不到时这个实例不能挂到 CParsec 上，否则后续 SDK 调用会崩在 nil 上。
+	var isUsable: Bool {
+		return _parsec != nil && _audio != nil
+	}
+
 	private var isVirtualShiftOn = false
 
 	public var clientWidth: Float = 1920
@@ -77,7 +83,23 @@ class ParsecSDKBridge: ParsecService {
 	/// shutdown 幂等标记：deinit 里会再调一次，避免重复 audio_clear / disconnect。
 	private var isShutDown = false
 
-	public var mouseInfo = MouseInfo()
+	/// 光标状态：事件线程写、UI 线程读。MouseInfo 是多字段 struct，
+	/// 不加锁时可能读到「半更新」的中间态（表现为光标偶发跳一下）。
+	private let mouseLock = NSLock()
+	private var _mouseInfo = MouseInfo()
+
+	public var mouseInfo: MouseInfo {
+		get {
+			mouseLock.lock()
+			defer { mouseLock.unlock() }
+			return _mouseInfo
+		}
+		set {
+			mouseLock.lock()
+			_mouseInfo = newValue
+			mouseLock.unlock()
+		}
+	}
 
 	init() {
 		os_log("%{public}@", log: sdkLog, "Parsec SDK Version: " + String(ParsecSDKBridge.PARSEC_VER))
@@ -86,7 +108,8 @@ class ParsecSDKBridge: ParsecService {
 
 		ParsecSetLogCallback(
 			{ (level, msg, _) in
-				os_log("%{public}@", log: sdkLog, type: .debug, "[\(level == LOG_DEBUG ? "D" : "I")] \(String(cString: msg!))")
+				guard let msg = msg else { return }
+				os_log("%{public}@", log: sdkLog, type: .debug, "[\(level == LOG_DEBUG ? "D" : "I")] \(String(cString: msg))")
 			}, nil)
 
 		audio_init(&_audio)
@@ -109,14 +132,22 @@ class ParsecSDKBridge: ParsecService {
 			print("error: \(error)")
 		}
 
+		if _parsec == nil {
+			os_log("%{public}@", log: sdkLog, "ParsecInit failed: _parsec is nil")
+		}
 	}
 
 	deinit {
 		// 正常路径下 CParsec.destroy() 已经调用过 shutdown()；这里是兜底，
 		// 保证直接释放实例时轮询也会停、音频队列也会被清掉。
 		shutdown()
-		ParsecDestroy(_parsec)
-		audio_destroy(&_audio)
+		// ParsecInit / audio_init 失败时指针可能是 nil，直接传给 C 函数会崩
+		if _parsec != nil {
+			ParsecDestroy(_parsec)
+		}
+		if _audio != nil {
+			audio_destroy(&_audio)
+		}
 	}
 
 	func connect(_ peerID: String) -> ParsecStatus {
@@ -333,15 +364,12 @@ class ParsecSDKBridge: ParsecService {
 
 	func handleUserDataEvent(event: ParsecClientUserDataEvent) {
 
-		let pointer = ParsecGetBuffer(_parsec, event.key)
-		if pointer == nil {
-			return
-		}
+		guard let pointer = ParsecGetBuffer(_parsec, event.key) else { return }
 		switch event.id {
 		case 11:
 			do {
 				let decoder = JSONDecoder()
-				let config = try decoder.decode(ParsecUserDataVideoConfig.self, from: Data(bytesNoCopy: pointer!, count: strlen(pointer!), deallocator: .none))
+				let config = try decoder.decode(ParsecUserDataVideoConfig.self, from: Data(bytesNoCopy: pointer, count: strlen(pointer), deallocator: .none))
 				let videoConfig = config.video.first
 				DispatchQueue.main.async {
 					if let cfg = videoConfig {
@@ -364,7 +392,7 @@ class ParsecSDKBridge: ParsecService {
 		case 12:
 			do {
 				let decoder = JSONDecoder()
-				let config = try decoder.decode(Array<ParsecDisplayConfig>.self, from: Data(bytesNoCopy: pointer!, count: strlen(pointer!), deallocator: .none))
+				let config = try decoder.decode(Array<ParsecDisplayConfig>.self, from: Data(bytesNoCopy: pointer, count: strlen(pointer), deallocator: .none))
 				DispatchQueue.main.async {
 					DataManager.model.displayConfigs = config
 				}
@@ -409,8 +437,11 @@ class ParsecSDKBridge: ParsecService {
 			let render: CGColorRenderingIntent = CGColorRenderingIntent.defaultIntent
 			let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
 			let bitmapInfo: CGBitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue)
-			let providerRef: CGDataProvider? = CGDataProvider(data: NSData(bytes: pointer, length: Int(size)))
-			let cgimage: CGImage? = CGImage(width: Int(width), height: Int(height), bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(width) * elmentLength, space: rgbColorSpace, bitmapInfo: bitmapInfo, provider: providerRef!, decode: nil, shouldInterpolate: true, intent: render)
+			guard let providerRef = CGDataProvider(data: NSData(bytes: pointer, length: Int(size))) else {
+				ParsecFree(pointer)
+				return
+			}
+			let cgimage: CGImage? = CGImage(width: Int(width), height: Int(height), bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(width) * elmentLength, space: rgbColorSpace, bitmapInfo: bitmapInfo, provider: providerRef, decode: nil, shouldInterpolate: true, intent: render)
 			if cgimage != nil {
 				mouseInfo.cursorImg = cgimage
 			}
@@ -681,7 +712,7 @@ class ParsecSDKBridge: ParsecService {
 		videoConfig.video[0].fullFPS = DataManager.model.constantFps
 		videoConfig.video[0].output = DataManager.model.output
 		let encoder = JSONEncoder()
-		let data = try! encoder.encode(videoConfig)
+		guard let data = try? encoder.encode(videoConfig) else { return }
 		CParsec.sendUserData(type: .setVideoConfig, message: data)
 	}
 }
