@@ -352,6 +352,12 @@ class ParsecSDKBridge: ParsecService {
 			handleCursorEvent(event: e.cursor, sawCursor: &sawCursor)
 		} else if e.type == CLIENT_EVENT_USER_DATA {
 			handleUserDataEvent(event: e.userData)
+		} else if e.type == CLIENT_EVENT_RUMBLE {
+			// 主机下发的震动数据：转发给对应手柄（内部会切回主线程）
+			let rumble = e.rumble
+			GamepadController.shared.applyRumble(gamepadID: rumble.gamepadID,
+												 motorBig: rumble.motorBig,
+												 motorSmall: rumble.motorSmall)
 		} else if e.type == CLIENT_EVENT_STREAM {
 			os_log("%{public}@", log: sdkLog, "[stream] s=\(e.stream.stream) status=\(e.stream.status.rawValue)")
 		} else if e.type == CLIENT_EVENT_BLOCKED {

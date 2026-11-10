@@ -38,6 +38,9 @@ struct SettingsHandler {
 	@AppStorage("gamepadInvertRightY") public static var gamepadInvertRightY: Bool = false
 	@AppStorage("gamepadSwapABXY") public static var gamepadSwapABXY: Bool = false
 	@AppStorage("gamepadSecondController") public static var gamepadSecondController: Bool = false
+	@AppStorage("gamepadRumble") public static var gamepadRumble: Bool = true
+	/// 按街映射表（JSON：来源 -> 目标），空表示全部走默认
+	@AppStorage("gamepadMappingData") public static var gamepadMappingData: Data = Data()
 
 	// 陀螺仪（Parsec 协议没有陀螺仪通道，只能是"模拟"输出）
 	@AppStorage("gyroEnabled") public static var gyroEnabled: Bool = false
