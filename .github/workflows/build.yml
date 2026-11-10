@@ -229,13 +229,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set +e
           ls -lh out
           NOTES="自动构建（未签名 fakesign）· commit ${GITHUB_SHA} · run ${GITHUB_RUN_NUMBER}"
           if gh release view nightly >/dev/null 2>&1; then
-            gh release upload nightly "out/$SCHEME.ipa" --clobber
-            gh release edit nightly --notes "$NOTES"
+            msg=$(gh release upload nightly "out/$SCHEME.ipa" --clobber 2>&1)
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              gh release edit nightly --notes "$NOTES" >/dev/null 2>&1
+            fi
           else
-            gh release create nightly "out/$SCHEME.ipa" --title "nightly" --notes "$NOTES"
+            msg=$(gh release create nightly "out/$SCHEME.ipa" --title "nightly" --notes "$NOTES" 2>&1)
+            rc=$?
+          fi
+          echo "$msg"
+          if [ $rc -ne 0 ]; then
+            echo "$msg" | head -4 | cut -c1-500 | sed 's/^/::error::/'
+            exit $rc
           fi
           echo "::notice::直链 ${{ github.server_url }}/${{ github.repository }}/releases/download/nightly/$SCHEME.ipa"
