@@ -205,6 +205,12 @@ class CParsec {
 
 	static var parsecImpl: ParsecService!
 
+	/// 是否已创建 Parsec 实例。输入事件（手柄/键盘/鼠标）可能早于连接到达，
+	/// 这时 `parsecImpl` 还是 nil，直接发消息会崩，必须先判空。
+	static var hasInstance: Bool {
+		return parsecImpl != nil
+	}
+
 	/// 创建（或重建）Parsec 实例。
 	///
 	/// 旧实例必须先显式 shutdown：`ParsecSDKBridge` 的 audio / event 两条轮询循环

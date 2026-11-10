@@ -211,6 +211,9 @@ final class GamepadController: ObservableObject {
 		if pressed {
 			lastEvent = "\(physical.label) → \(Self.label(for: target)) #\(id)"
 		}
+		// 没实例（首启还没连过）或已断开时都不能发消息：前者是 nil 崩溃，
+		// 后者是往废弃的 client 发消息，可能崩在 SDK 内部。
+		guard CParsec.hasInstance, ParsecBackgroundManager.shared.hasActiveConnection else { return }
 		CParsec.sendGameControllerButtonMessage(controllerId: id, target, pressed: pressed)
 	}
 
@@ -221,6 +224,7 @@ final class GamepadController: ObservableObject {
 		if value > 0.05 {
 			lastEvent = "\(label) → \(String(format: "%.2f", value))"
 		}
+		guard CParsec.hasInstance, ParsecBackgroundManager.shared.hasActiveConnection else { return }
 		CParsec.sendGameControllerAxisMessage(controllerId: id, axis, ButtonFloatToParsecInt(value))
 	}
 
@@ -242,6 +246,7 @@ final class GamepadController: ObservableObject {
 			if GyroController.shared.ownsRightStick { return }
 		}
 
+		guard CParsec.hasInstance, ParsecBackgroundManager.shared.hasActiveConnection else { return }
 		CParsec.sendGameControllerAxisMessage(controllerId: id, axisX, ButtonFloatToParsecInt(ax))
 		CParsec.sendGameControllerAxisMessage(controllerId: id, axisY, ButtonFloatToParsecInt(ay))
 	}
@@ -367,7 +372,9 @@ final class GamepadController: ObservableObject {
 	@objc func didDisconnectController(_ notification: Notification) {
 		guard let controller = notification.object as? GCController else { return }
 		if let index = orderedControllers.firstIndex(where: { $0 === controller }) {
-			CParsec.sendGameControllerUnplugMessage(controllerId: UInt32(index + 1))
+			if CParsec.hasInstance {
+				CParsec.sendGameControllerUnplugMessage(controllerId: UInt32(index + 1))
+			}
 			orderedControllers.remove(at: index)
 		}
 		delegate?.inputManager(self, didDisconnect: controller)
@@ -647,6 +654,7 @@ final class GyroController: ObservableObject {
 		guard force || abs(x - lastStickX) > 0.02 || abs(y - lastStickY) > 0.02 else { return }
 		lastStickX = x
 		lastStickY = y
+		guard CParsec.hasInstance, ParsecBackgroundManager.shared.hasActiveConnection else { return }
 		CParsec.sendGameControllerAxisMessage(controllerId: 1, GAMEPAD_AXIS_RX, toParsec(x))
 		CParsec.sendGameControllerAxisMessage(controllerId: 1, GAMEPAD_AXIS_RY, toParsec(y))
 	}
