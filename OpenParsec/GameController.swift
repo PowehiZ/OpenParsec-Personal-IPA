@@ -218,35 +218,54 @@ enum GamepadMapping {
 	}
 }
 
-/// 单个手柄的震动引擎：一个常驻的连续事件 + 动态参数调制度，
-/// 避免每次 rumble 事件都重建 pattern（会咔哒、也费 CPU）。
+/// 单个手柄的震动引擎。
 ///
-/// 注意：引擎和 player 必须被强引用住。之前"震动测试没反应"就是因为
-/// 二者都是局部变量，函数返回即被 ARC 释放，震动还没输出就被掐断。
+/// 三个现实问题都在这里处理：
+/// 1. `CHHapticEngine.start()` 会偶发 `Couldn't communicate with a helper application`
+///    （与系统 haptics 服务的 XPC 连接没就绪），所以要重试而不是一次失败就放弃；
+/// 2. 不同手柄支持的 locality 不同，`.default` 不一定可用，需要逐个试；
+/// 3. 手柄通道彻底不可用时退化成手机 Taptic Engine，至少还有反馈。
+///
+/// 另外引擎和 player 必须被强引用住（之前"震动测试没反应"就是局部变量被 ARC 提前释放）。
 @available(iOS 14.0, *)
 private final class RumbleEngine {
 	private let engine: CHHapticEngine
 	private let player: CHHapticAdvancedPatternPlayer
+	/// 是否退化成手机自身震动
+	private(set) var usedFallback = false
+	/// 最近一次失败的原始描述（供设置页显示）
+	private(set) var lastError = ""
+
 	private var lastIntensity: Double = -1
 	private var lastSharpness: Double = -1
 
-	init(haptics: GCDeviceHaptics) throws {
-		// 不同手柄支持的震动区域不同，`.default` 不一定在列表里，逐个试
+	init(haptics: GCDeviceHaptics?) throws {
 		var created: CHHapticEngine?
-		var failure: Error?
-		for locality in RumbleEngine.candidates(haptics) {
-			do {
-				created = try haptics.createEngine(withLocality: locality)
-				break
-			} catch {
-				failure = error
+		var failures: [String] = []
+
+		if let haptics = haptics {
+			for locality in RumbleEngine.candidates(haptics) {
+				do {
+					created = try haptics.createEngine(withLocality: locality)
+					break
+				} catch {
+					failures.append("\(locality.rawValue): \(RumbleEngine.describe(error))")
+				}
 			}
 		}
-		guard let engine = created else {
-			throw failure ?? NSError(domain: "OpenParsecRumble", code: -1,
-									 userInfo: [NSLocalizedDescriptionKey: "no supported haptics locality"])
+
+		if let engine = created {
+			self.engine = engine
+			self.usedFallback = false
+		} else if CHHapticEngine.capabilitiesForHardware().supportsHaptics {
+			// 手柄通道不可用 → 用手机 Taptic Engine 代替
+			self.engine = try CHHapticEngine()
+			self.usedFallback = true
+			self.lastError = failures.joined(separator: " | ")
+		} else {
+			throw NSError(domain: "OpenParsecRumble", code: -1,
+						  userInfo: [NSLocalizedDescriptionKey: failures.joined(separator: " | ")])
 		}
-		self.engine = engine
 
 		let event = CHHapticEvent(eventType: .hapticContinuous,
 								  parameters: [
@@ -256,10 +275,14 @@ private final class RumbleEngine {
 								  relativeTime: 0,
 								  duration: 3600)
 		let pattern = try CHHapticPattern(events: [event], parameters: [])
-		let advancedPlayer = try engine.makeAdvancedPlayer(with: pattern)
+		let advancedPlayer = try self.engine.makeAdvancedPlayer(with: pattern)
 		self.player = advancedPlayer
-		try engine.start()
-		try advancedPlayer.start(atTime: 0)
+
+		// 启动失败不致命：留到 set() 时再试，避免初始化时把 UI 卡住
+		if let error = RumbleEngine.startWithRetry(self.engine) {
+			lastError = [lastError, RumbleEngine.describe(error)].filter { !$0.isEmpty }.joined(separator: " | ")
+		}
+		try? advancedPlayer.start(atTime: 0)
 	}
 
 	/// 优先 default，其次手柄声明支持的区域；列表为空时仍然试 default
@@ -271,6 +294,32 @@ private final class RumbleEngine {
 		return filtered.isEmpty ? preferred : filtered
 	}
 
+	/// 重试启动：XPC 连接没就绪时第一次通常失败，隔一点时间再来
+	private static func startWithRetry(_ engine: CHHapticEngine) -> Error? {
+		var last: Error?
+		for attempt in 0..<3 {
+			do {
+				try engine.start()
+				return nil
+			} catch {
+				last = error
+				if attempt < 2 {
+					Thread.sleep(forTimeInterval: 0.08 * Double(attempt + 1))
+				}
+			}
+		}
+		return last
+	}
+
+	private static func describe(_ error: Error) -> String {
+		let ns = error as NSError
+		let hint = ns.localizedDescription
+		if ns.domain == CHHapticErrorDomain {
+			return "CHHaptic \(ns.code): \(hint)"
+		}
+		return "\(ns.domain) \(ns.code): \(hint)"
+	}
+
 	func set(intensity: Double, sharpness: Double) {
 		let i = min(max(intensity, 0), 1)
 		let sh = min(max(sharpness, 0), 1)
@@ -278,14 +327,15 @@ private final class RumbleEngine {
 		lastIntensity = i
 		lastSharpness = sh
 		do {
-			// 系统可能因为静音/切后台把引擎停了，这里每次唤醒一下再改参数
+			// 引擎可能被系统停过（切后台/静音），这里每次唤醒
 			try engine.start()
 			try player.sendParameters([
 				CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: Float(i), relativeTime: 0),
 				CHHapticDynamicParameter(parameterID: .hapticSharpnessControl, value: Float(sh), relativeTime: 0)
 			], atTime: 0)
+			lastError = ""
 		} catch {
-			// 引擎不可用时忽略：手柄本身可能不支持震动
+			lastError = RumbleEngine.describe(error)
 		}
 	}
 
@@ -597,9 +647,8 @@ final class GamepadController: ObservableObject {
 			return
 		}
 		guard intensity > 0.02 else { return }
-		guard let haptics = controller.haptics else { return }
 		do {
-			let engine = try RumbleEngine(haptics: haptics)
+			let engine = try RumbleEngine(haptics: controller.haptics)
 			rumbleEngines[gamepadID] = engine
 			engine.set(intensity: intensity, sharpness: sharpness)
 		} catch {
@@ -632,13 +681,8 @@ final class GamepadController: ObservableObject {
 			lastEvent = L("No controller connected")
 			return
 		}
-		guard let haptics = controller.haptics else {
-			lastEvent = L("This controller has no rumble")
-			return
-		}
-
-		// 手柄支持哪些震动区域（空表 = 系统认为这只手柄不能震）
-		let supported = haptics.supportedLocalities.map { $0.rawValue }.sorted()
+		// 手柄支持哪些震动区域（空表或 nil = 系统认为这只手柄不能震）
+		let supported = controller.haptics?.supportedLocalities.map { $0.rawValue }.sorted() ?? []
 
 		do {
 			// 复用常驻引擎：原来的写法把 engine/player 放在局部变量里，
@@ -647,11 +691,15 @@ final class GamepadController: ObservableObject {
 			if let existing = rumbleEngines[1] as? RumbleEngine {
 				engine = existing
 			} else {
-				engine = try RumbleEngine(haptics: haptics)
+				engine = try RumbleEngine(haptics: controller.haptics)
 				rumbleEngines[1] = engine
 			}
 			engine.set(intensity: 1.0, sharpness: 0.7)
-			lastEvent = L("Rumble Test") + " ✓ " + (supported.isEmpty ? "no-locality" : supported.joined(separator: "/"))
+			var parts: [String] = []
+			parts.append(engine.usedFallback ? "phone" : "controller")
+			if !supported.isEmpty { parts.append(supported.joined(separator: "/")) }
+			if !engine.lastError.isEmpty { parts.append(engine.lastError) }
+			lastEvent = L("Rumble Test") + " ✓ " + parts.joined(separator: " · ")
 			DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
 				(self?.rumbleEngines[1] as? RumbleEngine)?.set(intensity: 0, sharpness: 0.7)
 			}
