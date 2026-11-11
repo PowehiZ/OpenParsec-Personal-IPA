@@ -685,9 +685,12 @@ final class GamepadController: ObservableObject {
 			// 复用常驻引擎：原来的写法把 engine/player 放在局部变量里，
 			// 函数一返回就被 ARC 释放，震动还没输出就被掐断 —— 这就是"测试没反应"的原因。
 			let engine: RumbleEngine
-			if let existing = rumbleEngines[1] as? RumbleEngine {
+			if let existing = rumbleEngines[1] as? RumbleEngine, !existing.usedFallback {
 				engine = existing
 			} else {
+				// 上次退化成手机震动 → 这次重新争取手柄通道（换线/换连接方式后能恢复）
+				(rumbleEngines[1] as? RumbleEngine)?.shutdown()
+				rumbleEngines[1] = nil
 				engine = try RumbleEngine(haptics: controller.haptics)
 				rumbleEngines[1] = engine
 			}
