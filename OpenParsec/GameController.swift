@@ -312,12 +312,9 @@ private final class RumbleEngine {
 	}
 
 	private static func describe(_ error: Error) -> String {
+		// 不用 CHHapticErrorDomain 常量（Swift 侧不可见），直接回显 domain/code
 		let ns = error as NSError
-		let hint = ns.localizedDescription
-		if ns.domain == CHHapticErrorDomain {
-			return "CHHaptic \(ns.code): \(hint)"
-		}
-		return "\(ns.domain) \(ns.code): \(hint)"
+		return "\(ns.domain)/\(ns.code): \(ns.localizedDescription)"
 	}
 
 	func set(intensity: Double, sharpness: Double) {
