@@ -316,6 +316,12 @@ struct SettingsView: View {
 									Button(L("Test")) { gamepad.testHaptics() }
 								}
 							}
+						CatItem(L("Diagnostics"), icon: "stethoscope") {
+							Text(gamepad.rumbleDiagnostic)
+								.font(.system(size: 9.5, design: .monospaced))
+								.lineLimit(1)
+								.foregroundColor(Color("Foreground").opacity(0.45))
+						}
 						}
 						CatTitle(L("Button Mapping"))
 						CatList {
@@ -374,6 +380,26 @@ struct SettingsView: View {
 										.frame(width: 150)
 								}
 							}
+						CatItem(L("Preview"), icon: "waveform.path.ecg") {
+							HStack(spacing: 8) {
+								Text(String(format: "%.0f / %.0f", gyro.rawRateH, gyro.rawRateV))
+									.font(.system(size: 11, design: .monospaced))
+									.foregroundColor(Color("Foreground").opacity(0.5))
+								Button(gyro.previewRunning ? L("Stop") : L("Start")) {
+									if gyro.previewRunning {
+										gyro.stopPreview()
+									} else {
+										gyro.startPreview()
+									}
+								}
+							}
+						}
+						CatItem(L("Diagnostics"), icon: "stethoscope") {
+							Text(gyro.diagnosticText)
+								.font(.system(size: 9.5, design: .monospaced))
+								.lineLimit(2)
+								.foregroundColor(Color("Foreground").opacity(0.45))
+						}
 						CatItem(L("Horizontal Sensitivity"), icon: "arrow.left.and.right") {
 							TilePicker(selection: levelID(gyroSensitivityH, levels: [0.500, 1.000, 2.000, 3.000]), choices: [
 								TileChoice(id: "0.500", caption: "0.5×") { SensitivityPreview(value: 0.500) },

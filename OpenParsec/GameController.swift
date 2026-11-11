@@ -610,6 +610,16 @@ final class GamepadController: ObservableObject {
 	private var rumbleEngines: [UInt32: Any] = [:]
 	/// 最近一次收到的震动强度，供设置页显示（0 说明主机没下发 rumble）
 	@Published private(set) var lastRumbleIntensity: Double = 0
+	/// 收到主机 rumble 事件的次数（0 = 主机一条都没下发）
+	@Published private(set) var rumbleEvents: Int = 0
+	@Published private(set) var lastRumbleBig: UInt8 = 0
+	@Published private(set) var lastRumbleSmall: UInt8 = 0
+
+	/// 设置页用的震动诊断串
+	var rumbleDiagnostic: String {
+		let engine = rumbleEngines.isEmpty ? "none" : "ready"
+		return String(format: "events=%d last=%d/%d engine=%@", rumbleEvents, lastRumbleBig, lastRumbleSmall, engine)
+	}
 
 	/// 由事件轮询线程调用，内部切回主线程
 	func applyRumble(gamepadID: UInt32, motorBig: UInt8, motorSmall: UInt8) {
@@ -619,6 +629,10 @@ final class GamepadController: ObservableObject {
 			}
 			return
 		}
+		// 先记录：即使开关关着，也要能看出主机有没有下发数据
+		rumbleEvents += 1
+		lastRumbleBig = motorBig
+		lastRumbleSmall = motorSmall
 		guard SettingsHandler.gamepadRumble else { return }
 		guard #available(iOS 14.0, *) else { return }
 		applyRumbleOnMain(gamepadID: gamepadID, motorBig: motorBig, motorSmall: motorSmall)
@@ -913,6 +927,75 @@ final class GyroController: ObservableObject {
 		}
 	}
 
+	// MARK: 预览（不依赖串流，用来判断传感器到底有没有数据）
+
+	@Published private(set) var previewRunning = false
+	@Published private(set) var rawRateH: Double = 0
+	@Published private(set) var rawRateV: Double = 0
+	@Published private(set) var sampleCount: Int = 0
+	private var previewOnly = false
+
+	/// 设置页诊断串
+	var diagnosticText: String {
+		let sensor = motion.isDeviceMotionAvailable ? "ok" : "none"
+		let target = SettingsHandler.gyroTarget == .mouse ? "mouse" : "stick"
+		return String(format: "sensor=%@ run=%@ samples=%d deg/s=%.0f/%.0f target=%@",
+					  sensor, running ? "yes" : "no", sampleCount, rawRateH, rawRateV, target)
+	}
+
+	func startPreview() {
+		if !Thread.isMainThread {
+			DispatchQueue.main.async { [weak self] in self?.startPreview() }
+			return
+		}
+		guard motion.isDeviceMotionAvailable else {
+			statusText = L("No gyroscope on this device")
+			return
+		}
+		guard !running else {
+			statusText = L("Gyro is running, stop it first")
+			return
+		}
+		guard !previewOnly else { return }
+
+		previewOnly = true
+		previewRunning = true
+		sampleCount = 0
+		statusText = L("Preview running")
+		motion.deviceMotionUpdateInterval = 0.02
+		motion.startDeviceMotionUpdates(to: queue) { [weak self] data, _ in
+			self?.handlePreview(data)
+		}
+	}
+
+	func stopPreview() {
+		if !Thread.isMainThread {
+			DispatchQueue.main.async { [weak self] in self?.stopPreview() }
+			return
+		}
+		guard previewOnly else { return }
+		previewOnly = false
+		previewRunning = false
+		motion.stopDeviceMotionUpdates()
+		statusText = SettingsHandler.gyroEnabled ? L("Stopped") : L("Off")
+	}
+
+	/// 预览模式：只采样和显示，不发任何输入
+	private func handlePreview(_ data: CMDeviceMotion?) {
+		guard previewOnly else { return }
+		guard let d = data else { return }
+		guard let frame = rotationFrame(data: d) else { return }
+		sampleCount += 1
+		let h = frame.h * 180.0 / Double.pi
+		let v = frame.v * 180.0 / Double.pi
+		if sampleCount % 5 == 0 {
+			DispatchQueue.main.async { [weak self] in
+				self?.rawRateH = h
+				self?.rawRateV = v
+			}
+		}
+	}
+
 	func stop() {
 		if !Thread.isMainThread {
 			DispatchQueue.main.async { [weak self] in self?.stop() }
@@ -922,6 +1005,8 @@ final class GyroController: ObservableObject {
 		// 注意顺序：running 置 false 后 ownsRightStick 就会变 false，所以先记下来
 		let wasOwningRightStick = SettingsHandler.gyroEnabled && SettingsHandler.gyroTarget == .rightStick
 		running = false
+		previewOnly = false
+		previewRunning = false
 		motion.stopDeviceMotionUpdates()
 		if wasOwningRightStick {
 			// 交还控制权前先把摇杆归零，避免卡在推满状态
